@@ -4,11 +4,13 @@ import gc
 import json
 import multiprocessing as mp
 import os
+import re
 import tempfile
 import urllib.request
 from collections.abc import Generator
 from typing import Any
 
+import requests
 import torch
 import whisper
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -17,8 +19,13 @@ from fastapi.responses import StreamingResponse
 router = APIRouter()
 
 SUPPORTED_MODELS = ("tiny", "base", "small", "large-v3")
+SUPPORTED_CAPTION_MODES = ("local", "hybrid")
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 FORCE_CPU_FOR_LARGE_V3 = os.getenv("VOXORA_FORCE_CPU_FOR_LARGE_V3", "1") == "1"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+GEMINI_BATCH_SIZE = 24
+GEMINI_BATCH_CHAR_LIMIT = 2200
 
 
 def detect_whisper_device() -> str:
@@ -122,6 +129,125 @@ def _sse(step: str, label: str, pct: int, extra: dict[str, Any] | None = None) -
     if extra:
         payload.update(extra)
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _extract_json_array(raw: str) -> list[dict[str, Any]]:
+    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    if not match:
+        return []
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
+def _chunk_segment_indices(segments: list[dict[str, Any]]) -> list[list[int]]:
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    current_chars = 0
+
+    for idx, seg in enumerate(segments):
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+
+        payload_len = len(text) + 8
+        would_exceed_count = len(current) >= GEMINI_BATCH_SIZE
+        would_exceed_chars = current_chars + payload_len > GEMINI_BATCH_CHAR_LIMIT
+        if current and (would_exceed_count or would_exceed_chars):
+            chunks.append(current)
+            current = []
+            current_chars = 0
+
+        current.append(idx)
+        current_chars += payload_len
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _gemini_correct_segments(
+    segments: list[dict[str, Any]],
+    language: str,
+) -> tuple[list[dict[str, Any]], int, int]:
+    if not GEMINI_API_KEY or not segments:
+        return segments, 0, 0
+
+    corrected = [dict(seg) for seg in segments]
+    chunk_indices = _chunk_segment_indices(corrected)
+    changed = 0
+
+    for indices in chunk_indices:
+        lines = []
+        for idx in indices:
+            text = str(corrected[idx].get("text", "")).strip().replace("\n", " ")
+            lines.append(f"{idx}|{text}")
+
+        prompt = (
+            "Fix ASR errors only. Keep same language. Keep meaning, slang style, and sentence count. "
+            "Do not add timestamps, speakers, or explanations. "
+            "Return ONLY JSON array: [{\"i\":number,\"t\":string}]."
+        )
+        user_input = (
+            f"language_hint={language}\n"
+            "items:\n"
+            + "\n".join(lines)
+        )
+
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {"text": user_input},
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "topP": 0.8,
+                "maxOutputTokens": 1400,
+            },
+        }
+
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+            f"?key={GEMINI_API_KEY}"
+        )
+
+        try:
+            resp = requests.post(url, json=body, timeout=45)
+            resp.raise_for_status()
+            data = resp.json()
+            text = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
+            updates = _extract_json_array(text)
+            for item in updates:
+                i = item.get("i")
+                t = str(item.get("t", "")).strip()
+                if not isinstance(i, int):
+                    continue
+                if i < 0 or i >= len(corrected):
+                    continue
+                if not t:
+                    continue
+                prev = str(corrected[i].get("text", ""))
+                if t != prev:
+                    changed += 1
+                corrected[i]["text"] = t
+        except Exception:
+            # Keep original batch on any API/parse failure for robustness.
+            continue
+
+    return corrected, changed, len(chunk_indices)
 
 
 def _run_whisper_job(
@@ -300,6 +426,7 @@ async def caption_audio(
     granularity: str = Form("line"),
     max_chars: int = Form(50),
     model: str = Form("small"),
+    mode: str = Form("hybrid"),
 ) -> StreamingResponse:
     if language not in {"id", "en", "auto"}:
         raise HTTPException(status_code=400, detail="Unsupported language")
@@ -309,6 +436,9 @@ async def caption_audio(
 
     if model not in SUPPORTED_MODELS:
         raise HTTPException(status_code=400, detail="Unsupported model")
+
+    if mode not in SUPPORTED_CAPTION_MODES:
+        raise HTTPException(status_code=400, detail="Unsupported caption mode")
 
     filename = file.filename or "audio"
     temp_input_path = ""
@@ -409,6 +539,23 @@ async def caption_audio(
             detected = str(worker_payload.get("language_detected") or "unknown")
             segments = worker_payload.get("segments", [])
 
+            refinement_note = ""
+            refined_with = "local"
+            if mode == "hybrid" and granularity == "line":
+                if GEMINI_API_KEY:
+                    yield _sse("refine", "Refining transcript with Gemini…", 92)
+                    segments, changed_count, batch_count = _gemini_correct_segments(
+                        segments=segments,
+                        language=language,
+                    )
+                    refined_with = "hybrid"
+                    refinement_note = (
+                        f"Gemini refinement applied on {batch_count} batch(es), "
+                        f"updated {changed_count} segment(s)."
+                    )
+                else:
+                    refinement_note = "Hybrid selected but GEMINI_API_KEY is missing, used local output only."
+
             srt = build_srt(segments)
 
             yield _sse("done", "Captions ready!", 100, {
@@ -416,6 +563,8 @@ async def caption_audio(
                     "segments": segments,
                     "language_detected": detected,
                     "srt": srt,
+                    "refined_with": refined_with,
+                    "refinement_note": refinement_note,
                 }
             })
 

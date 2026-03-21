@@ -188,6 +188,7 @@ function CaptionTool({ setToast }) {
   const [granularity, setGranularity] = useState("line");
   const [maxChars, setMaxChars] = useState(50);
   const [model, setModel] = useState("small");
+  const [captionMode, setCaptionMode] = useState("hybrid");
   const [loading, setLoading] = useState(false);
   const [progressLog, setProgressLog] = useState([]);
   const [progressPct, setProgressPct] = useState(0);
@@ -473,6 +474,7 @@ function CaptionTool({ setToast }) {
       formData.append("granularity", granularity);
       formData.append("max_chars", String(maxChars));
       formData.append("model", model);
+      formData.append("mode", captionMode);
 
       const res = await fetch(`${API_BASE}/caption`, { 
         method: "POST", 
@@ -518,6 +520,9 @@ function CaptionTool({ setToast }) {
       setResult(captionResult);
       setActiveIndex(0);
       setModelStatuses((prev) => ({ ...prev, [model]: true }));
+      if (captionResult?.refinement_note) {
+        setToast({ type: "info", title: "Refinement", message: captionResult.refinement_note });
+      }
       setToast({ type: "success", title: "Done", message: "Captions generated." });
     } catch (err) {
       if (err.name === "AbortError") {
@@ -559,6 +564,7 @@ function CaptionTool({ setToast }) {
   const langLabel =
     language === "id" ? "Bahasa Indonesia" : language === "en" ? "English" : "Auto-detect";
   const granLabel = granularity === "word" ? "Word-level" : "Line-level";
+  const modeLabel = captionMode === "hybrid" ? "Hybrid" : "Local";
   const selectedModelReady = Boolean(modelStatuses?.[model]);
   const downloadedModelCount = WHISPER_MODEL_OPTIONS.filter((name) => modelStatuses?.[name]).length;
   const modelDownloadText = modelDownloadBytes.total > 0
@@ -666,6 +672,13 @@ function CaptionTool({ setToast }) {
                     <option value="auto">Auto-detect</option>
                   </select>
                 </label>
+                <label>
+                  <span className="field-label">Processing mode</span>
+                  <select value={captionMode} onChange={(e) => setCaptionMode(e.target.value)}>
+                    <option value="hybrid">Hybrid (local + Gemini refine)</option>
+                    <option value="local">Local only</option>
+                  </select>
+                </label>
                 <div>
                   <span className="field-label">Granularity</span>
                   <div className="segmented-control" role="group" aria-label="Caption granularity">
@@ -751,6 +764,7 @@ function CaptionTool({ setToast }) {
                 <span className="pill-badge muted">{langLabel}</span>
                 <span className="pill-badge muted">{granLabel}</span>
                 <span className="pill-badge muted">{model}</span>
+                <span className="pill-badge muted">{modeLabel}</span>
               </div>
             </header>
             <button
