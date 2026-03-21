@@ -3,13 +3,16 @@ from __future__ import annotations
 import gc
 import json
 import multiprocessing as mp
+import mimetypes
 import os
 import re
 import tempfile
 import urllib.request
+from base64 import b64encode
 from collections.abc import Generator
 from typing import Any
 
+import librosa
 import requests
 import torch
 import whisper
@@ -19,13 +22,14 @@ from fastapi.responses import StreamingResponse
 router = APIRouter()
 
 SUPPORTED_MODELS = ("tiny", "base", "small", "large-v3")
-SUPPORTED_CAPTION_MODES = ("local", "hybrid")
+SUPPORTED_CAPTION_MODES = ("local", "hybrid", "cloud")
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 FORCE_CPU_FOR_LARGE_V3 = os.getenv("VOXORA_FORCE_CPU_FOR_LARGE_V3", "1") == "1"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 GEMINI_BATCH_SIZE = 24
 GEMINI_BATCH_CHAR_LIMIT = 2200
+GEMINI_CLOUD_MAX_BYTES = int(os.getenv("GEMINI_CLOUD_MAX_BYTES", str(18 * 1024 * 1024)))
 
 
 def detect_whisper_device() -> str:
@@ -132,7 +136,10 @@ def _sse(step: str, label: str, pct: int, extra: dict[str, Any] | None = None) -
 
 
 def _extract_json_array(raw: str) -> list[dict[str, Any]]:
-    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not match:
         return []
     try:
@@ -142,6 +149,22 @@ def _extract_json_array(raw: str) -> list[dict[str, Any]]:
     if isinstance(parsed, list):
         return [item for item in parsed if isinstance(item, dict)]
     return []
+
+
+def _extract_json_object(raw: str) -> dict[str, Any]:
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
 
 
 def _chunk_segment_indices(segments: list[dict[str, Any]]) -> list[list[int]]:
@@ -168,6 +191,223 @@ def _chunk_segment_indices(segments: list[dict[str, Any]]) -> list[list[int]]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def _guess_audio_mime_type(filename: str, content_type: str | None) -> str:
+    if content_type and "/" in content_type:
+        return content_type
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "audio/wav"
+
+
+def _audio_duration_seconds(path: str) -> float:
+    try:
+        value = float(librosa.get_duration(path=path))
+        return max(0.0, value)
+    except Exception:
+        return 0.0
+
+
+def _sanitize_cloud_segments(raw_segments: list[dict[str, Any]], duration: float) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    cursor = 0.0
+    n = max(1, len(raw_segments))
+    fallback_span = max(0.35, (duration / n) if duration > 0 else 1.0)
+
+    for item in raw_segments:
+        text = str(item.get("text", item.get("t", ""))).strip()
+        if not text:
+            continue
+        try:
+            start = float(item.get("start", cursor))
+        except (TypeError, ValueError):
+            start = cursor
+        try:
+            end = float(item.get("end", start + fallback_span))
+        except (TypeError, ValueError):
+            end = start + fallback_span
+
+        if start < cursor:
+            start = cursor
+        if end <= start:
+            end = start + fallback_span
+        if duration > 0:
+            start = min(max(0.0, start), duration)
+            end = min(max(start, end), duration)
+            if end <= start:
+                end = min(duration, start + 0.2)
+
+        cleaned.append({"start": start, "end": end, "text": text, "words": []})
+        cursor = end
+
+    if not cleaned:
+        return []
+
+    if duration > 0 and cleaned[-1]["end"] < duration:
+        cleaned[-1]["end"] = duration
+    return cleaned
+
+
+def _line_segments_to_word_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    words_out: list[dict[str, Any]] = []
+    for seg in segments:
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        tokens = [t for t in text.split() if t]
+        if not tokens:
+            continue
+        span = max(0.001, end - start)
+        step = span / len(tokens)
+        for i, token in enumerate(tokens):
+            w_start = start + i * step
+            w_end = start + (i + 1) * step
+            words_out.append({"start": w_start, "end": w_end, "text": token, "words": []})
+    return words_out
+
+
+def _fallback_text_to_segments(text: str, duration: float, max_chars: int) -> list[dict[str, Any]]:
+    normalized = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    if not normalized:
+        return []
+
+    # Sentence-first split, then length-based fallback to avoid giant single blocks.
+    sentence_parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", normalized) if p.strip()]
+    if not sentence_parts:
+        sentence_parts = [normalized]
+
+    chunks: list[str] = []
+    limit = max(40, min(120, int(max_chars)))
+    for sentence in sentence_parts:
+        words = sentence.split()
+        current = ""
+        for word in words:
+            candidate = (current + " " + word).strip()
+            if current and len(candidate) > limit:
+                chunks.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+
+    if not chunks:
+        chunks = [normalized]
+
+    total_chars = sum(max(1, len(c)) for c in chunks)
+    cursor = 0.0
+    fallback_total = duration if duration > 0 else max(3.0, len(chunks) * 1.4)
+    segments: list[dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks):
+        weight = max(1, len(chunk)) / total_chars
+        span = max(0.35, fallback_total * weight)
+        start = cursor
+        end = start + span
+        if idx == len(chunks) - 1:
+            end = max(end, fallback_total)
+        segments.append({"start": start, "end": end, "text": chunk, "words": []})
+        cursor = end
+
+    return segments
+
+
+def _gemini_cloud_transcribe(
+    *,
+    audio_path: str,
+    mime_type: str,
+    language: str,
+    granularity: str,
+    max_chars: int,
+) -> tuple[str, list[dict[str, Any]], str]:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is missing")
+
+    with open(audio_path, "rb") as fp:
+        audio_bytes = fp.read()
+
+    if not audio_bytes:
+        raise RuntimeError("Audio file is empty")
+    if len(audio_bytes) > GEMINI_CLOUD_MAX_BYTES:
+        max_mb = GEMINI_CLOUD_MAX_BYTES / (1024 * 1024)
+        raise RuntimeError(f"Audio too large for cloud mode (> {max_mb:.1f} MB)")
+
+    target_lang = "auto" if language == "auto" else language
+    prompt = (
+        "Transcribe the audio and return ONLY valid JSON object with this shape: "
+        "{\"language\":\"id|en|...\",\"segments\":[{\"start\":number,\"end\":number,\"text\":string}]}. "
+        "Use seconds for start/end, monotonic increasing, no overlaps, no extra keys. "
+        "Keep original spoken style and language. "
+        f"language_hint={target_lang}. "
+        "If uncertain, do best effort and still return valid JSON object only."
+    )
+
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": b64encode(audio_bytes).decode("ascii"),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.0,
+            "topP": 0.1,
+            "maxOutputTokens": 4096,
+        },
+    }
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
+    resp = requests.post(url, json=body, timeout=120)
+    resp.raise_for_status()
+    payload = resp.json()
+    raw_text = (
+        payload.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+    )
+
+    duration = _audio_duration_seconds(audio_path)
+    obj = _extract_json_object(raw_text)
+    parsed_segments = []
+    detected = "unknown"
+
+    if obj:
+        detected = str(obj.get("language") or "unknown").strip().lower() or "unknown"
+        maybe_segments = obj.get("segments", [])
+        if isinstance(maybe_segments, list):
+            parsed_segments = [item for item in maybe_segments if isinstance(item, dict)]
+
+    # Backward compatibility if model still returns array-only.
+    if not parsed_segments:
+        parsed_segments = _extract_json_array(raw_text)
+
+    if parsed_segments:
+        final_segments = _sanitize_cloud_segments(parsed_segments, duration)
+    else:
+        fallback_text = raw_text.strip()
+        if not fallback_text:
+            raise RuntimeError("Gemini cloud transcription returned empty output")
+        final_segments = _fallback_text_to_segments(fallback_text, duration, max_chars)
+
+    if granularity == "word":
+        final_segments = _line_segments_to_word_segments(final_segments)
+
+    if detected == "unknown" and target_lang != "auto":
+        detected = target_lang
+    note = f"Cloud transcription via {GEMINI_MODEL}."
+    return detected, final_segments, note
 
 
 def _gemini_correct_segments(
@@ -270,7 +510,7 @@ def _run_whisper_job(
     try:
         transcribe_opts: dict[str, Any] = {
             "language": None if language == "auto" else language,
-            "word_timestamps": True,
+            "word_timestamps": granularity == "word",
             "task": "transcribe",
             "beam_size": 1 if model == "large-v3" else 5,
             "best_of": 1,
@@ -441,6 +681,7 @@ async def caption_audio(
         raise HTTPException(status_code=400, detail="Unsupported caption mode")
 
     filename = file.filename or "audio"
+    mime_type = _guess_audio_mime_type(filename, file.content_type)
     temp_input_path = ""
     total_bytes = 0
 
@@ -465,6 +706,33 @@ async def caption_audio(
     def generate() -> Generator[str, None, None]:
         try:
             yield _sse("read", "Reading audio file…", 10)
+
+            if mode == "cloud":
+                yield _sse("model", f"Using Gemini cloud transcription ({GEMINI_MODEL})…", 45)
+                yield _sse("transcribe", "Uploading audio to Gemini cloud…", 70)
+                detected, segments, cloud_note = _gemini_cloud_transcribe(
+                    audio_path=temp_input_path,
+                    mime_type=mime_type,
+                    language=language,
+                    granularity=granularity,
+                    max_chars=max_chars,
+                )
+                if not segments:
+                    raise RuntimeError("Cloud transcription produced no segments")
+
+                yield _sse("segments", "Building caption segments…", 90)
+                srt = build_srt(segments)
+                yield _sse("done", "Captions ready!", 100, {
+                    "result": {
+                        "segments": segments,
+                        "language_detected": detected,
+                        "srt": srt,
+                        "refined_with": "cloud",
+                        "refinement_note": cloud_note,
+                    }
+                })
+                return
+
             cache_root = whisper_cache_dir()
             if not is_model_downloaded(model, cache_root):
                 yield from stream_model_download_events(
@@ -478,7 +746,16 @@ async def caption_audio(
             if model == "large-v3" and device == "cpu":
                 yield _sse("model", "Using CPU low-memory mode for large-v3 on this device…", 52)
 
-            yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
+            worker_device = device
+            if device == "mps" and granularity == "word":
+                worker_device = "cpu"
+                yield _sse(
+                    "model",
+                    "Word-level timestamps are more stable on CPU for this device, switching worker to CPU…",
+                    54,
+                )
+
+            yield _sse("model", f"Loading Whisper '{model}' model on {worker_device.upper()}…", 55)
             yield _sse("transcribe", "Transcribing audio in isolated worker…", 65)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix="_caption_result.json") as tmp_result:
@@ -495,7 +772,7 @@ async def caption_audio(
                         "granularity": granularity,
                         "max_chars": int(max_chars),
                         "cache_root": cache_root,
-                        "device": device,
+                        "device": worker_device,
                         "result_path": result_path,
                     },
                 )
@@ -504,7 +781,7 @@ async def caption_audio(
                     process.join(timeout=0.25)
 
                 if process.exitcode != 0:
-                    if device != "cpu":
+                    if worker_device != "cpu":
                         yield _sse("model", "Worker failed on current device, retrying on CPU low-memory mode…", 60)
                         process = ctx.Process(
                             target=_run_whisper_job,

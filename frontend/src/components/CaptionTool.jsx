@@ -285,6 +285,7 @@ function CaptionTool({ setToast }) {
       setGranularity(draft.granularity || "line");
       setMaxChars(typeof draft.maxChars === "number" ? draft.maxChars : 50);
       setModel(draft.model || "small");
+      setCaptionMode(draft.captionMode || "hybrid");
       setResult(draft.result || { segments: restoredSegments, language_detected: draft.language || "unknown" });
       setEditableSegments(restoredSegments);
       setActiveIndex(Number.isInteger(draft.activeIndex) ? draft.activeIndex : -1);
@@ -379,6 +380,7 @@ function CaptionTool({ setToast }) {
       granularity,
       maxChars,
       model,
+      captionMode,
       activeStep,
       activeIndex,
       completedSteps: Array.from(completedSteps),
@@ -399,6 +401,7 @@ function CaptionTool({ setToast }) {
     granularity,
     maxChars,
     model,
+    captionMode,
     activeStep,
     activeIndex,
     completedSteps,
@@ -519,7 +522,9 @@ function CaptionTool({ setToast }) {
 
       setResult(captionResult);
       setActiveIndex(0);
-      setModelStatuses((prev) => ({ ...prev, [model]: true }));
+      if (captionMode !== "cloud") {
+        setModelStatuses((prev) => ({ ...prev, [model]: true }));
+      }
       if (captionResult?.refinement_note) {
         setToast({ type: "info", title: "Refinement", message: captionResult.refinement_note });
       }
@@ -564,7 +569,8 @@ function CaptionTool({ setToast }) {
   const langLabel =
     language === "id" ? "Bahasa Indonesia" : language === "en" ? "English" : "Auto-detect";
   const granLabel = granularity === "word" ? "Word-level" : "Line-level";
-  const modeLabel = captionMode === "hybrid" ? "Hybrid" : "Local";
+  const modeLabel =
+    captionMode === "hybrid" ? "Hybrid" : captionMode === "cloud" ? "Cloud" : "Local";
   const selectedModelReady = Boolean(modelStatuses?.[model]);
   const downloadedModelCount = WHISPER_MODEL_OPTIONS.filter((name) => modelStatuses?.[name]).length;
   const modelDownloadText = modelDownloadBytes.total > 0
@@ -677,6 +683,7 @@ function CaptionTool({ setToast }) {
                   <select value={captionMode} onChange={(e) => setCaptionMode(e.target.value)}>
                     <option value="hybrid">Hybrid (local + Gemini refine)</option>
                     <option value="local">Local only</option>
+                    <option value="cloud">Cloud (Gemini only)</option>
                   </select>
                 </label>
                 <div>
@@ -703,6 +710,12 @@ function CaptionTool({ setToast }) {
                     <p className="small-text">Each word becomes its own timed entry.</p>
                   </div>
                 )}
+                {captionMode === "cloud" ? (
+                  <div className="settings-note">
+                    <strong>Cloud mode</strong>
+                    <p className="small-text">Whisper model lokal tidak dipakai pada mode ini.</p>
+                  </div>
+                ) : (
                 <details className="advanced-panel">
                   <summary>Whisper model</summary>
                   <label>
@@ -730,6 +743,7 @@ function CaptionTool({ setToast }) {
                     {modelStatusError && <p className="small-text model-status-note model-status-note-error">{modelStatusError}</p>}
                   </div>
                 </details>
+                )}
               </div>
             </div>
             <div className="step-advance-row">
@@ -763,7 +777,7 @@ function CaptionTool({ setToast }) {
               <div className="caption-summary-pills">
                 <span className="pill-badge muted">{langLabel}</span>
                 <span className="pill-badge muted">{granLabel}</span>
-                <span className="pill-badge muted">{model}</span>
+                {captionMode !== "cloud" && <span className="pill-badge muted">{model}</span>}
                 <span className="pill-badge muted">{modeLabel}</span>
               </div>
             </header>
@@ -776,7 +790,7 @@ function CaptionTool({ setToast }) {
               {loading ? "Transcribing audio…" : "Generate Captions"}
             </button>
             {loading && <div className="shimmer-bar" aria-hidden="true" />}
-            {loading && modelDownloadPct !== null && modelDownloadPct < 100 && (
+            {captionMode !== "cloud" && loading && modelDownloadPct !== null && modelDownloadPct < 100 && (
               <div className="model-download-progress" role="status" aria-live="polite">
                 <div className="model-download-head">
                   <strong>Downloading model: {model}</strong>
@@ -788,7 +802,7 @@ function CaptionTool({ setToast }) {
                 <p className="small-text">{modelDownloadText}</p>
               </div>
             )}
-            {!loading && !selectedModelReady && (
+            {captionMode !== "cloud" && !loading && !selectedModelReady && (
               <p className="small-text model-download-hint">
                 Model <strong>{model}</strong> belum terdownload. Saat generate pertama kali, model akan diunduh dulu.
               </p>
