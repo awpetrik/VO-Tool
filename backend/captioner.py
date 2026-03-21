@@ -7,6 +7,7 @@ import urllib.request
 from collections.abc import Generator
 from typing import Any
 
+import torch
 import whisper
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -14,6 +15,18 @@ from fastapi.responses import StreamingResponse
 router = APIRouter()
 
 SUPPORTED_MODELS = ("tiny", "base", "small", "large-v3")
+
+
+def detect_whisper_device() -> str:
+    # Prefer CUDA, then Apple Metal (MPS), then CPU.
+    if torch.cuda.is_available():
+        return "cuda"
+
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend and mps_backend.is_available():
+        return "mps"
+
+    return "cpu"
 
 
 def whisper_cache_dir() -> str:
@@ -228,15 +241,27 @@ async def caption_audio(
                         download_root=cache_root,
                     )
 
-                yield _sse("model", f"Loading Whisper '{model}' model…", 55)
-                model_instance = whisper.load_model(model, download_root=cache_root)
+                device = detect_whisper_device()
+                yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
+                model_instance = whisper.load_model(
+                    model,
+                    download_root=cache_root,
+                    device=device,
+                )
 
                 yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
+                transcribe_opts: dict[str, Any] = {
+                    "language": None if language == "auto" else language,
+                    "word_timestamps": True,
+                    "task": "transcribe",
+                }
+                # MPS/CPU are more stable with fp16 disabled.
+                if device in {"cpu", "mps"}:
+                    transcribe_opts["fp16"] = False
+
                 result = model_instance.transcribe(
                     tmp.name,
-                    language=None if language == "auto" else language,
-                    word_timestamps=True,
-                    task="transcribe",
+                    **transcribe_opts,
                 )
 
             yield _sse("segments", "Building caption segments…", 85)
