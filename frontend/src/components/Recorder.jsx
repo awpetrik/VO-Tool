@@ -7,6 +7,8 @@ function Recorder({ onAudioReady }) {
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
+  const audioUrlRef = useRef("");
+  const isRecordingRef = useRef(false);
   const canvasRef = useRef(null);
   const analyserRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -110,9 +112,17 @@ function Recorder({ onAudioReady }) {
   };
 
   useEffect(() => {
+    audioUrlRef.current = audioUrl;
+  }, [audioUrl]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  useEffect(() => {
     drawIdleWave();
     const onResize = () => {
-      if (!isRecording) drawIdleWave();
+      if (!isRecordingRef.current) drawIdleWave();
     };
     window.addEventListener("resize", onResize);
 
@@ -121,12 +131,12 @@ function Recorder({ onAudioReady }) {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
       stopVisualizer();
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
       }
       window.removeEventListener("resize", onResize);
     };
-  }, [audioUrl, isRecording]);
+  }, []);
 
   const startRecording = async () => {
     try {
