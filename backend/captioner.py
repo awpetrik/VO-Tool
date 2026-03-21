@@ -6,6 +6,7 @@ import multiprocessing as mp
 import mimetypes
 import os
 import re
+import subprocess
 import tempfile
 import urllib.request
 from base64 import b64encode
@@ -30,6 +31,56 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 GEMINI_BATCH_SIZE = 24
 GEMINI_BATCH_CHAR_LIMIT = 2200
 GEMINI_CLOUD_MAX_BYTES = int(os.getenv("GEMINI_CLOUD_MAX_BYTES", str(18 * 1024 * 1024)))
+
+# Audio conversion settings (for large files)
+AUDIO_CONVERSION_THRESHOLD_BYTES = int(os.getenv("AUDIO_CONVERSION_THRESHOLD_BYTES", str(50 * 1024 * 1024)))
+AUDIO_CONVERSION_TARGET_SAMPLE_RATE = 16000
+AUDIO_CONVERSION_TARGET_BITRATE = "128k"
+
+
+def _should_convert_audio(file_size_bytes: int) -> bool:
+    """Check if audio file should be converted/compressed."""
+    return file_size_bytes > AUDIO_CONVERSION_THRESHOLD_BYTES
+
+
+def _convert_audio_with_ffmpeg(input_path: str, output_path: str) -> bool:
+    """
+    Convert audio file using ffmpeg to reduce size.
+    Converts to 16kHz mono WAV with reduced bitrate for transcription.
+    Returns True on success, False on failure.
+    """
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",  # Overwrite output file
+            "-i", input_path,
+            "-acodec", "pcm_s16le",  # PCM codec for WAV
+            "-ar", str(AUDIO_CONVERSION_TARGET_SAMPLE_RATE),  # 16kHz sample rate
+            "-ac", "1",  # Mono (1 channel)
+            "-q:a", "9",  # Quality setting for encoding
+            output_path,
+        ]
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,  # 5 minute timeout
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            print(f"FFmpeg conversion warning: {stderr}")
+            return False
+        return True
+    except FileNotFoundError:
+        print("FFmpeg not found. Skipping audio conversion.")
+        return False
+    except subprocess.TimeoutExpired:
+        print("FFmpeg conversion timeout. Skipping conversion.")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"Error during audio conversion: {e}")
+        return False
 
 
 def detect_whisper_device() -> str:
@@ -703,15 +754,34 @@ async def caption_audio(
 
     await file.close()
 
+    # Check if file should be converted to reduce size
+    temp_converted_path = ""
+    if _should_convert_audio(total_bytes):
+        temp_converted = tempfile.NamedTemporaryFile(delete=False, suffix="_converted.wav")
+        temp_converted_path = temp_converted.name
+        temp_converted.close()
+
     def generate() -> Generator[str, None, None]:
+        converted_audio_path = temp_input_path  # Default to original file
+        
         try:
-            yield _sse("read", "Reading audio file…", 10)
+            # Convert audio if needed
+            if temp_converted_path:
+                yield _sse("convert", f"Converting audio ({total_bytes / 1024 / 1024:.1f}MB) to optimize…", 15)
+                if _convert_audio_with_ffmpeg(temp_input_path, temp_converted_path):
+                    converted_size = os.path.getsize(temp_converted_path)
+                    yield _sse("convert", f"Audio optimized ({converted_size / 1024 / 1024:.1f}MB)…", 18)
+                    converted_audio_path = temp_converted_path
+                else:
+                    yield _sse("convert", "Audio optimization skipped, using original…", 18)
+            
+            yield _sse("read", "Reading audio file…", 20)
 
             if mode == "cloud":
                 yield _sse("model", f"Using Gemini cloud transcription ({GEMINI_MODEL})…", 45)
                 yield _sse("transcribe", "Uploading audio to Gemini cloud…", 70)
                 detected, segments, cloud_note = _gemini_cloud_transcribe(
-                    audio_path=temp_input_path,
+                    audio_path=converted_audio_path,
                     mime_type=mime_type,
                     language=language,
                     granularity=granularity,
@@ -766,7 +836,7 @@ async def caption_audio(
                 process = ctx.Process(
                     target=_run_whisper_job,
                     kwargs={
-                        "audio_path": temp_input_path,
+                        "audio_path": converted_audio_path,
                         "model": model,
                         "language": language,
                         "granularity": granularity,
@@ -786,7 +856,7 @@ async def caption_audio(
                         process = ctx.Process(
                             target=_run_whisper_job,
                             kwargs={
-                                "audio_path": temp_input_path,
+                                "audio_path": converted_audio_path,
                                 "model": model,
                                 "language": language,
                                 "granularity": granularity,
@@ -852,6 +922,11 @@ async def caption_audio(
                 os.remove(temp_input_path)
             except OSError:
                 pass
+            if temp_converted_path:
+                try:
+                    os.remove(temp_converted_path)
+                except OSError:
+                    pass
 
     return StreamingResponse(
         generate(),

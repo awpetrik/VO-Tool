@@ -12,3 +12,4 @@ torch
 numpy
 requests
 rich
+ffmpeg-python
