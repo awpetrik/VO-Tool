@@ -5,7 +5,7 @@ const PRESETS = {
   Interview: { noise_reduction: 75, clarity: 65, de_reverb: 40, compression: 65, normalize: true },
 };
 
-function EnhancementControls({ settings, setSettings, activePreset, setActivePreset }) {
+function EnhancementControls({ settings, setSettings, activePreset, setActivePreset, embedded = false, showTitle = true }) {
   const setPreset = (name) => {
     if (name === "Custom") {
       setActivePreset("Custom");
@@ -21,8 +21,8 @@ function EnhancementControls({ settings, setSettings, activePreset, setActivePre
   };
 
   return (
-    <section className="card">
-      <h3>Enhancement Controls</h3>
+    <section className={embedded ? "enhancement-controls" : "card enhancement-controls"}>
+      {showTitle && <h3>Enhancement Controls</h3>}
       <div className="pill-row">
         {Object.keys(PRESETS)
           .concat("Custom")

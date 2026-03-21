@@ -530,6 +530,11 @@ summary:focus-visible,
   gap: 12px;
 }
 
+.enhancement-controls {
+  display: grid;
+  gap: 16px;
+}
+
 input[type="range"] {
   width: 100%;
   accent-color: var(--color-primary);
@@ -582,6 +587,17 @@ input[type="range"] {
   align-items: center;
 }
 
+.compare-card,
+.waveform-card {
+  display: grid;
+  gap: 12px;
+}
+
+.review-content-stack {
+  display: grid;
+  gap: 16px;
+}
+
 .player-box {
   background: var(--color-surface-2);
   border-radius: 12px;
@@ -618,6 +634,22 @@ input[type="range"] {
 
 .settings-panel-soft {
   background: var(--color-surface-2);
+}
+
+.enhance-side-panel {
+  align-content: start;
+}
+
+.enhance-side-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.enhance-side-meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .section-heading {
@@ -720,6 +752,55 @@ input[type="range"] {
   margin-top: 14px;
 }
 
+.model-status-panel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+
+.model-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.model-status-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-status-chip.ready {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.model-status-chip.missing {
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+}
+
+.model-status-note {
+  margin: 8px 0 0;
+}
+
+.model-status-note-error {
+  color: var(--color-error);
+}
+
 .caption-action-card .small-text,
 .export-card .small-text {
   margin: 10px 0 0;
@@ -802,12 +883,26 @@ textarea {
   background: var(--color-surface);
   text-align: left;
   cursor: pointer;
+  scroll-margin-block: 76px;
 }
 
 .caption-row.active {
-  background: #f2f7ff;
-  border-color: rgba(61, 90, 128, 0.46);
-  box-shadow: 0 8px 22px rgba(61, 90, 128, 0.14);
+  background: linear-gradient(180deg, #f5f9ff 0%, #eef5ff 100%);
+  border-color: rgba(61, 90, 128, 0.58);
+  box-shadow: 0 10px 24px rgba(61, 90, 128, 0.16);
+  transform: translateX(2px);
+  position: relative;
+}
+
+.caption-row.active::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 6px;
+  background: var(--color-primary);
 }
 
 .caption-row:hover {
@@ -875,6 +970,36 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.model-download-progress {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+}
+
+.model-download-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.model-download-progress .small-text {
+  margin: 8px 0 0;
+}
+
+.model-download-hint {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #f7d9a8;
+  background: #fff7e6;
+  color: #8a5a14;
 }
 
 .progress-track {
@@ -1211,6 +1336,8 @@ textarea {
   overflow-y: auto;
   padding: 2px 4px 16px;
   margin: 0 -4px;
+  scroll-padding-top: 88px;
+  scroll-padding-bottom: 72px;
 }
 
 .review-player-panel {
@@ -1235,6 +1362,14 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.enhance-review-meta {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.enhance-format-selector {
+  margin-bottom: 16px;
 }
 
 .review-meta .small-text {

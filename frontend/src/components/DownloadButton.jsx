@@ -1,4 +1,4 @@
-function DownloadButton({ enhancedBlob, format }) {
+function DownloadButton({ enhancedBlob, format, onDownload }) {
   const download = () => {
     if (!enhancedBlob) return;
     const ext = format.toLowerCase();
@@ -8,6 +8,7 @@ function DownloadButton({ enhancedBlob, format }) {
     a.download = `enhanced_audio.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
+    onDownload?.();
   };
 
   return (

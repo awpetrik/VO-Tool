@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import urllib.request
 from collections.abc import Generator
 from typing import Any
 
@@ -10,6 +12,26 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 router = APIRouter()
+
+SUPPORTED_MODELS = ("tiny", "base", "small", "large-v3")
+
+
+def whisper_cache_dir() -> str:
+    default_cache = os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(os.getenv("XDG_CACHE_HOME", default_cache), "whisper")
+
+
+def model_download_target(model_name: str, download_root: str) -> str | None:
+    model_url = whisper._MODELS.get(model_name)  # type: ignore[attr-defined]
+    if not model_url:
+        return None
+    return os.path.join(download_root, os.path.basename(model_url))
+
+
+def is_model_downloaded(model_name: str, download_root: str | None = None) -> bool:
+    root = download_root or whisper_cache_dir()
+    target = model_download_target(model_name, root)
+    return bool(target and os.path.isfile(target))
 
 
 def seconds_to_srt_time(seconds: float) -> str:
@@ -78,6 +100,95 @@ def _sse(step: str, label: str, pct: int, extra: dict[str, Any] | None = None) -
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def stream_model_download_events(
+    model_name: str,
+    start_pct: int,
+    end_pct: int,
+    download_root: str,
+) -> Generator[str, None, None]:
+    target = model_download_target(model_name, download_root)
+    if not target:
+        return
+
+    if os.path.isfile(target):
+        yield _sse(
+            "model_download",
+            f"Whisper '{model_name}' model already available locally.",
+            end_pct,
+            {"download_pct": 100, "model": model_name, "model_cached": True},
+        )
+        return
+
+    model_url = whisper._MODELS[model_name]  # type: ignore[attr-defined]
+    os.makedirs(download_root, exist_ok=True)
+
+    yield _sse(
+        "model_download",
+        f"Downloading Whisper '{model_name}' model…",
+        start_pct,
+        {"download_pct": 0, "model": model_name, "model_cached": False},
+    )
+
+    with urllib.request.urlopen(model_url) as source, open(target, "wb") as output:
+        total = int(source.info().get("Content-Length") or 0)
+        downloaded = 0
+        last_sent_pct = -1
+
+        while True:
+            chunk = source.read(1024 * 256)
+            if not chunk:
+                break
+
+            output.write(chunk)
+            downloaded += len(chunk)
+
+            download_pct = int(downloaded * 100 / total) if total > 0 else 0
+            if download_pct == last_sent_pct and downloaded != total:
+                continue
+            last_sent_pct = download_pct
+
+            overall_pct = start_pct + int((end_pct - start_pct) * (download_pct / 100))
+            if total > 0:
+                label = (
+                    f"Downloading Whisper '{model_name}' model… "
+                    f"{downloaded / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MB"
+                )
+            else:
+                label = (
+                    f"Downloading Whisper '{model_name}' model… "
+                    f"{downloaded / (1024 * 1024):.1f} MB"
+                )
+
+            yield _sse(
+                "model_download",
+                label,
+                overall_pct,
+                {
+                    "download_pct": download_pct,
+                    "downloaded_bytes": downloaded,
+                    "total_bytes": total,
+                    "model": model_name,
+                    "model_cached": False,
+                },
+            )
+
+    yield _sse(
+        "model_download",
+        f"Whisper '{model_name}' model download complete.",
+        end_pct,
+        {"download_pct": 100, "model": model_name, "model_cached": False},
+    )
+
+
+@router.get("/caption/models/status")
+def caption_model_status() -> dict[str, Any]:
+    cache_root = whisper_cache_dir()
+    return {
+        "cache_dir": cache_root,
+        "models": {name: is_model_downloaded(name, cache_root) for name in SUPPORTED_MODELS},
+    }
+
+
 @router.post("/caption")
 async def caption_audio(
     file: UploadFile = File(...),
@@ -96,6 +207,9 @@ async def caption_audio(
     if granularity not in {"word", "line"}:
         raise HTTPException(status_code=400, detail="Unsupported granularity")
 
+    if model not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=400, detail="Unsupported model")
+
     filename = file.filename or "audio"
 
     def generate() -> Generator[str, None, None]:
@@ -105,10 +219,19 @@ async def caption_audio(
                 tmp.write(contents)
                 tmp.flush()
 
-                yield _sse("model", f"Loading Whisper '{model}' model…", 25)
-                model_instance = whisper.load_model(model)
+                cache_root = whisper_cache_dir()
+                if not is_model_downloaded(model, cache_root):
+                    yield from stream_model_download_events(
+                        model_name=model,
+                        start_pct=20,
+                        end_pct=50,
+                        download_root=cache_root,
+                    )
 
-                yield _sse("transcribe", "Transcribing audio — this may take a moment…", 45)
+                yield _sse("model", f"Loading Whisper '{model}' model…", 55)
+                model_instance = whisper.load_model(model, download_root=cache_root)
+
+                yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
                 result = model_instance.transcribe(
                     tmp.name,
                     language=None if language == "auto" else language,

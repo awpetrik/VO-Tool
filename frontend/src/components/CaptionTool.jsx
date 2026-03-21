@@ -4,6 +4,94 @@ import Uploader from "./Uploader";
 
 const API_BASE = "http://localhost:8001";
 const CAPTION_DRAFT_KEY = "voxora:caption-draft:v1";
+const WHISPER_MODEL_OPTIONS = ["tiny", "base", "small", "large-v3"];
+const AUDIO_DRAFT_DB = "voxora-caption-audio-db";
+const AUDIO_DRAFT_STORE = "audioDraft";
+const AUDIO_DRAFT_KEY = "latest";
+
+function openAudioDraftDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const request = indexedDB.open(AUDIO_DRAFT_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(AUDIO_DRAFT_STORE)) {
+        db.createObjectStore(AUDIO_DRAFT_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Failed to open IndexedDB"));
+  });
+}
+
+async function saveAudioDraft(file) {
+  try {
+    const db = await openAudioDraftDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_DRAFT_STORE, "readwrite");
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error("Failed to save audio draft"));
+      };
+      tx.objectStore(AUDIO_DRAFT_STORE).put(
+        {
+          blob: file,
+          name: file.name,
+          type: file.type || "audio/mpeg",
+          lastModified: file.lastModified || Date.now(),
+          savedAt: Date.now(),
+        },
+        AUDIO_DRAFT_KEY
+      );
+    });
+  } catch {
+    // Ignore storage failures so caption flow remains usable.
+  }
+}
+
+async function loadAudioDraft() {
+  try {
+    const db = await openAudioDraftDb();
+    const payload = await new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_DRAFT_STORE, "readonly");
+      const req = tx.objectStore(AUDIO_DRAFT_STORE).get(AUDIO_DRAFT_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error("Failed to load audio draft"));
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    });
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function clearAudioDraft() {
+  try {
+    const db = await openAudioDraftDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_DRAFT_STORE, "readwrite");
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error("Failed to clear audio draft"));
+      };
+      tx.objectStore(AUDIO_DRAFT_STORE).delete(AUDIO_DRAFT_KEY);
+    });
+  } catch {
+    // Ignore storage failures so clear action still works for text draft.
+  }
+}
 
 async function readSSEStream(res, onEvent) {
   const reader = res.body.getReader();
@@ -41,6 +129,33 @@ function formatTime(seconds) {
   return `${h}:${m}:${s},${ms}`;
 }
 
+function getActiveSegmentIndex(segments, currentTime) {
+  if (!Array.isArray(segments) || !segments.length) return -1;
+
+  const t = Math.max(0, Number(currentTime) || 0);
+  const epsilon = 0.06;
+  let fallbackIdx = -1;
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const rawStart = Number(segments[i]?.start);
+    const rawEnd = Number(segments[i]?.end);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) continue;
+
+    const start = Math.min(rawStart, rawEnd);
+    const end = Math.max(rawStart, rawEnd);
+
+    if (t + epsilon >= start && t <= end + epsilon) {
+      return i;
+    }
+
+    if (start <= t) {
+      fallbackIdx = i;
+    }
+  }
+
+  return fallbackIdx;
+}
+
 function buildSrt(segments) {
   return segments
     .map((seg, i) => `${i + 1}\n${formatTime(seg.start)} --> ${formatTime(seg.end)}\n${seg.text.trim()}`)
@@ -66,12 +181,19 @@ function CaptionTool({ setToast }) {
   const [loading, setLoading] = useState(false);
   const [progressLog, setProgressLog] = useState([]);
   const [progressPct, setProgressPct] = useState(0);
+  const [modelStatuses, setModelStatuses] = useState({});
+  const [modelStatusLoading, setModelStatusLoading] = useState(false);
+  const [modelStatusError, setModelStatusError] = useState("");
+  const [modelDownloadPct, setModelDownloadPct] = useState(null);
+  const [modelDownloadBytes, setModelDownloadBytes] = useState({ downloaded: 0, total: 0 });
   const [result, setResult] = useState(null);
   const [editableSegments, setEditableSegments] = useState([]);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [activeStep, setActiveStep] = useState(1);
   const [completedSteps, setCompletedSteps] = useState(new Set());
   const [draftSourceName, setDraftSourceName] = useState("");
+  const [restoringDraft, setRestoringDraft] = useState(false);
+  const restoredAudioUrlRef = useRef("");
   const audioRef = useRef(null);
   const reviewListRef = useRef(null);
   const rowRefs = useRef(new Map());
@@ -90,6 +212,10 @@ function CaptionTool({ setToast }) {
   };
 
   const onAudioReady = (selectedFile, previewUrl) => {
+    if (restoredAudioUrlRef.current && restoredAudioUrlRef.current !== previewUrl) {
+      URL.revokeObjectURL(restoredAudioUrlRef.current);
+      restoredAudioUrlRef.current = "";
+    }
     setFile(selectedFile);
     setDraftSourceName(selectedFile?.name || "");
     setAudioUrl(previewUrl);
@@ -97,10 +223,14 @@ function CaptionTool({ setToast }) {
     setEditableSegments([]);
     setActiveIndex(-1);
     localStorage.removeItem(CAPTION_DRAFT_KEY);
+    if (selectedFile) {
+      void saveAudioDraft(selectedFile);
+    }
   };
 
   const clearDraft = () => {
     localStorage.removeItem(CAPTION_DRAFT_KEY);
+    void clearAudioDraft();
     setResult(null);
     setEditableSegments([]);
     setActiveIndex(-1);
@@ -116,6 +246,7 @@ function CaptionTool({ setToast }) {
   };
 
   useEffect(() => {
+    let active = true;
     const raw = localStorage.getItem(CAPTION_DRAFT_KEY);
     if (!raw) return;
 
@@ -137,6 +268,23 @@ function CaptionTool({ setToast }) {
       setCompletedSteps(new Set(restoredCompleted));
       setActiveStep(draft.activeStep === 5 ? 5 : 4);
 
+      setRestoringDraft(true);
+      loadAudioDraft().then((audioDraft) => {
+        if (!active || !audioDraft?.blob) return;
+        const draftName = audioDraft.name || draft.sourceName || "restored-audio.wav";
+        const draftType = audioDraft.type || "audio/wav";
+        const restoredFile = new File([audioDraft.blob], draftName, {
+          type: draftType,
+          lastModified: Number(audioDraft.lastModified || Date.now()),
+        });
+        const restoredUrl = URL.createObjectURL(audioDraft.blob);
+        restoredAudioUrlRef.current = restoredUrl;
+        setFile(restoredFile);
+        setAudioUrl(restoredUrl);
+      }).finally(() => {
+        if (active) setRestoringDraft(false);
+      });
+
       setToast({
         type: "success",
         title: "Draft restored",
@@ -144,8 +292,46 @@ function CaptionTool({ setToast }) {
       });
     } catch {
       localStorage.removeItem(CAPTION_DRAFT_KEY);
+      if (active) setRestoringDraft(false);
     }
+    return () => {
+      active = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (restoredAudioUrlRef.current) {
+        URL.revokeObjectURL(restoredAudioUrlRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const fetchModelStatuses = async () => {
+      setModelStatusLoading(true);
+      setModelStatusError("");
+      try {
+        const res = await fetch(`${API_BASE}/caption/models/status`);
+        if (!res.ok) throw new Error("Failed to fetch model status");
+        const data = await res.json();
+        if (!active) return;
+        setModelStatuses(data?.models || {});
+      } catch {
+        if (!active) return;
+        setModelStatusError("Model status unavailable");
+      } finally {
+        if (active) setModelStatusLoading(false);
+      }
+    };
+
+    fetchModelStatuses();
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -190,15 +376,20 @@ function CaptionTool({ setToast }) {
     const row = rowRefs.current.get(activeIndex);
     if (!container || !row) return;
 
-    const currentTop = container.scrollTop;
-    const currentBottom = currentTop + container.clientHeight;
-    const rowTop = row.offsetTop - 8;
-    const rowBottom = rowTop + row.offsetHeight + 8;
+    // Keep active row in a safe zone and avoid placing it too close to clipped edges.
+    const safeTop = 88;
+    const safeBottom = 72;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const tooHigh = rowRect.top < containerRect.top + safeTop;
+    const tooLow = rowRect.bottom > containerRect.bottom - safeBottom;
 
-    if (rowTop < currentTop) {
-      container.scrollTo({ top: rowTop, behavior: "smooth" });
-    } else if (rowBottom > currentBottom) {
-      container.scrollTo({ top: rowBottom - container.clientHeight, behavior: "smooth" });
+    if (tooHigh || tooLow) {
+      row.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+        inline: "nearest",
+      });
     }
   }, [activeStep, activeIndex]);
 
@@ -231,6 +422,8 @@ function CaptionTool({ setToast }) {
     setLoading(true);
     setProgressLog([]);
     setProgressPct(0);
+    setModelDownloadPct(null);
+    setModelDownloadBytes({ downloaded: 0, total: 0 });
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -248,6 +441,13 @@ function CaptionTool({ setToast }) {
       await readSSEStream(res, (event) => {
         if (event.step === "error") { errorMsg = event.error || event.label; return; }
         setProgressPct(event.pct);
+        if (typeof event.download_pct === "number") {
+          setModelDownloadPct(event.download_pct);
+          setModelDownloadBytes({
+            downloaded: Number(event.downloaded_bytes || 0),
+            total: Number(event.total_bytes || 0),
+          });
+        }
         if (event.step !== "done") {
           setProgressLog((prev) => [...prev, event]);
         } else {
@@ -259,6 +459,8 @@ function CaptionTool({ setToast }) {
       if (!captionResult) throw new Error("No captions returned.");
 
       setResult(captionResult);
+      setActiveIndex(0);
+      setModelStatuses((prev) => ({ ...prev, [model]: true }));
       setToast({ type: "success", title: "Done", message: "Captions generated." });
     } catch (err) {
       setToast({ type: "error", title: "Error", message: err.message });
@@ -283,6 +485,11 @@ function CaptionTool({ setToast }) {
   const langLabel =
     language === "id" ? "Bahasa Indonesia" : language === "en" ? "English" : "Auto-detect";
   const granLabel = granularity === "word" ? "Word-level" : "Line-level";
+  const selectedModelReady = Boolean(modelStatuses?.[model]);
+  const downloadedModelCount = WHISPER_MODEL_OPTIONS.filter((name) => modelStatuses?.[name]).length;
+  const modelDownloadText = modelDownloadBytes.total > 0
+    ? `${(modelDownloadBytes.downloaded / (1024 * 1024)).toFixed(1)} / ${(modelDownloadBytes.total / (1024 * 1024)).toFixed(1)} MB`
+    : `${(modelDownloadBytes.downloaded / (1024 * 1024)).toFixed(1)} MB`;
   const segments = useMemo(() => editableSegments, [editableSegments]);
 
   return (
@@ -408,12 +615,27 @@ function CaptionTool({ setToast }) {
                   <label>
                     <span className="field-label">Model</span>
                     <select value={model} onChange={(e) => setModel(e.target.value)}>
-                      <option value="tiny">tiny — fastest</option>
-                      <option value="base">base</option>
-                      <option value="small">small — recommended</option>
-                      <option value="large-v3">large-v3 — most accurate</option>
+                      <option value="tiny">tiny — fastest {modelStatuses.tiny ? "(downloaded)" : "(not downloaded)"}</option>
+                      <option value="base">base {modelStatuses.base ? "(downloaded)" : "(not downloaded)"}</option>
+                      <option value="small">small — recommended {modelStatuses.small ? "(downloaded)" : "(not downloaded)"}</option>
+                      <option value="large-v3">large-v3 — most accurate {modelStatuses["large-v3"] ? "(downloaded)" : "(not downloaded)"}</option>
                     </select>
                   </label>
+                  <div className="model-status-panel" role="status" aria-live="polite">
+                    <div className="model-status-header">
+                      <span className="small-text">Downloaded models</span>
+                      <strong>{downloadedModelCount}/{WHISPER_MODEL_OPTIONS.length}</strong>
+                    </div>
+                    <div className="model-status-list">
+                      {WHISPER_MODEL_OPTIONS.map((name) => (
+                        <span key={name} className={`model-status-chip ${modelStatuses?.[name] ? "ready" : "missing"}`}>
+                          {name}: {modelStatuses?.[name] ? "downloaded" : "not downloaded"}
+                        </span>
+                      ))}
+                    </div>
+                    {modelStatusLoading && <p className="small-text model-status-note">Checking model cache…</p>}
+                    {modelStatusError && <p className="small-text model-status-note model-status-note-error">{modelStatusError}</p>}
+                  </div>
                 </details>
               </div>
             </div>
@@ -460,6 +682,23 @@ function CaptionTool({ setToast }) {
               {loading ? "Transcribing audio…" : "Generate Captions"}
             </button>
             {loading && <div className="shimmer-bar" aria-hidden="true" />}
+            {loading && modelDownloadPct !== null && modelDownloadPct < 100 && (
+              <div className="model-download-progress" role="status" aria-live="polite">
+                <div className="model-download-head">
+                  <strong>Downloading model: {model}</strong>
+                  <span>{modelDownloadPct}%</span>
+                </div>
+                <div className="progress-track" aria-hidden="true">
+                  <div className="progress-fill" style={{ width: `${modelDownloadPct}%` }} />
+                </div>
+                <p className="small-text">{modelDownloadText}</p>
+              </div>
+            )}
+            {!loading && !selectedModelReady && (
+              <p className="small-text model-download-hint">
+                Model <strong>{model}</strong> belum terdownload. Saat generate pertama kali, model akan diunduh dulu.
+              </p>
+            )}
             {(loading || progressLog.length > 0) && (
               <div className="progress-log" role="log" aria-live="polite">
                 <div className="progress-track" aria-hidden="true">
@@ -561,9 +800,14 @@ function CaptionTool({ setToast }) {
               </div>
               <aside className="review-player-panel">
                 <p className="field-label">Audio preview</p>
-                {!audioUrl && (
+                {!audioUrl && !restoringDraft && (
                   <p className="small-text review-player-warning">
                     Preview audio tidak tersedia setelah refresh. Upload ulang source audio untuk sync playback.
+                  </p>
+                )}
+                {restoringDraft && (
+                  <p className="small-text review-player-warning">
+                    Memulihkan audio draft...
                   </p>
                 )}
                 <audio
@@ -573,8 +817,16 @@ function CaptionTool({ setToast }) {
                   className="full-audio"
                   onTimeUpdate={(e) => {
                     const t = e.currentTarget.currentTime;
-                    const idx = segments.findIndex((s) => t >= s.start && t <= s.end);
-                    setActiveIndex(idx);
+                    const idx = getActiveSegmentIndex(segments, t);
+                    setActiveIndex((prev) => (prev === idx ? prev : idx));
+                  }}
+                  onPlay={(e) => {
+                    const idx = getActiveSegmentIndex(segments, e.currentTarget.currentTime);
+                    setActiveIndex((prev) => (prev === idx ? prev : idx));
+                  }}
+                  onSeeked={(e) => {
+                    const idx = getActiveSegmentIndex(segments, e.currentTarget.currentTime);
+                    setActiveIndex((prev) => (prev === idx ? prev : idx));
                   }}
                 />
                 <div className="review-meta">

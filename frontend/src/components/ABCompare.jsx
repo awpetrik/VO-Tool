@@ -1,9 +1,9 @@
-function ABCompare({ originalUrl, enhancedUrl }) {
+function ABCompare({ originalUrl, enhancedUrl, embedded = false, showTitle = true }) {
   if (!originalUrl && !enhancedUrl) return null;
 
   return (
-    <section className="card compare-card">
-      <h3>Before &amp; After</h3>
+    <section className={embedded ? "compare-card" : "card compare-card"}>
+      {showTitle && <h3>Before &amp; After</h3>}
       <div className="compare-grid">
         <div className="player-box">
           <p className="small-text">Original</p>
