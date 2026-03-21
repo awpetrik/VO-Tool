@@ -1,20 +1,130 @@
+import { useEffect, useRef, useState } from "react";
+import WaveSurfer from "wavesurfer.js";
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <path d="M5.5 3.5a.5.5 0 0 1 .764-.424l7 4a.5.5 0 0 1 0 .848l-7 4A.5.5 0 0 1 5.5 11.5v-8Z"/>
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <rect x="3.5" y="2.5" width="3" height="11" rx="1.25"/>
+      <rect x="9.5" y="2.5" width="3" height="11" rx="1.25"/>
+    </svg>
+  );
+}
+
+function formatAudioTime(seconds) {
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const mins = Math.floor(safeSeconds / 60);
+  const secs = Math.floor(safeSeconds % 60).toString().padStart(2, "0");
+  return `${mins}:${secs}`;
+}
+
+function WaveformLane({ label, url, tone, emptyLabel }) {
+  const containerRef = useRef(null);
+  const waveRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  useEffect(() => {
+    setReady(false);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+
+    if (!url || !containerRef.current) return undefined;
+
+    const isOriginal = tone === "original";
+    const wave = WaveSurfer.create({
+      container: containerRef.current,
+      url,
+      height: 58,
+      barWidth: 3,
+      barGap: 2,
+      barRadius: 999,
+      cursorWidth: 0,
+      normalize: true,
+      dragToSeek: true,
+      waveColor: isOriginal ? "#d6e0ee" : "#c5d4e8",
+      progressColor: isOriginal ? "#8ba2c2" : "#3d5a80",
+    });
+
+    waveRef.current = wave;
+    wave.on("ready", () => {
+      setReady(true);
+      setDuration(wave.getDuration());
+    });
+    wave.on("timeupdate", (time) => setCurrentTime(time));
+    wave.on("play", () => setIsPlaying(true));
+    wave.on("pause", () => setIsPlaying(false));
+    wave.on("finish", () => {
+      setIsPlaying(false);
+      setCurrentTime(wave.getDuration());
+    });
+
+    return () => {
+      wave.destroy();
+      waveRef.current = null;
+    };
+  }, [tone, url]);
+
+  const togglePlayback = () => {
+    if (!waveRef.current || !ready) return;
+    void waveRef.current.playPause();
+  };
+
+  return (
+    <div className={`wave-mini-row ${tone}${ready ? " is-ready" : ""}`}>
+      <div className="wave-mini-head">
+        <span className="wave-mini-label">{label}</span>
+        <span className="wave-mini-time">
+          {url ? `${formatAudioTime(currentTime)} / ${formatAudioTime(duration)}` : "--:-- / --:--"}
+        </span>
+      </div>
+
+      {url ? (
+        <div className="wave-mini-shell">
+          <button
+            type="button"
+            className={`wave-mini-play${isPlaying ? " playing" : ""}`}
+            onClick={togglePlayback}
+            disabled={!ready}
+            aria-label={isPlaying ? `Pause ${label}` : `Play ${label}`}
+          >
+            {isPlaying ? <PauseIcon /> : <PlayIcon />}
+          </button>
+          <div className="wave-mini-canvas-wrap">
+            <div ref={containerRef} className="wave-mini-canvas" />
+          </div>
+        </div>
+      ) : (
+        <div className="wave-mini-placeholder" aria-hidden="true">
+          {Array.from({ length: 48 }).map((_, idx) => (
+            <span key={idx} style={{ height: `${10 + ((idx * 9) % 26)}px` }} />
+          ))}
+        </div>
+      )}
+
+      <p className="small-text">{url ? `${label} ready` : emptyLabel}</p>
+    </div>
+  );
+}
+
 function WaveformViewer({ originalUrl = "", enhancedUrl = "", embedded = false, showTitle = true }) {
   return (
     <section className={embedded ? "waveform-card" : "card waveform-card"}>
       {showTitle && <h3>Waveform</h3>}
-      <div className="wave-track original">
-        {Array.from({ length: 72 }).map((_, idx) => (
-          <span key={`o-${idx}`} style={{ height: `${8 + ((idx * 5) % 24)}px` }} />
-        ))}
+      <div className="wave-mini-stack">
+        <WaveformLane label="Original" url={originalUrl} tone="original" emptyLabel="Waiting for source" />
+        <WaveformLane label="Enhanced" url={enhancedUrl} tone="enhanced" emptyLabel="Enhanced available after processing" />
       </div>
-      <p className="small-text">Original {originalUrl ? "ready" : "waiting for source"}</p>
-
-      <div className="wave-track enhanced">
-        {Array.from({ length: 72 }).map((_, idx) => (
-          <span key={`e-${idx}`} style={{ height: `${10 + ((idx * 9) % 28)}px` }} />
-        ))}
-      </div>
-      <p className="small-text">Enhanced {enhancedUrl ? "ready" : "available after processing"}</p>
     </section>
   );
 }

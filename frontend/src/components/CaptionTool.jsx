@@ -197,6 +197,7 @@ function CaptionTool({ setToast }) {
   const audioRef = useRef(null);
   const reviewListRef = useRef(null);
   const rowRefs = useRef(new Map());
+  const wizardRef = useRef(null);
 
   const markDone = (stepId) =>
     setCompletedSteps((prev) => new Set([...prev, stepId]));
@@ -207,8 +208,19 @@ function CaptionTool({ setToast }) {
     return stepId <= Math.max(...completedSteps) + 1;
   };
 
+  const scrollToWizard = () => {
+    requestAnimationFrame(() => {
+      if (!wizardRef.current) return;
+      const rect = wizardRef.current.getBoundingClientRect();
+      const scrollTarget = window.scrollY + rect.top - 76;
+      window.scrollTo({ top: Math.max(0, scrollTarget), behavior: "smooth" });
+    });
+  };
+
   const goTo = (stepId) => {
-    if (canAccess(stepId)) setActiveStep(stepId);
+    if (!canAccess(stepId)) return;
+    setActiveStep(stepId);
+    scrollToWizard();
   };
 
   const onAudioReady = (selectedFile, previewUrl) => {
@@ -493,7 +505,7 @@ function CaptionTool({ setToast }) {
   const segments = useMemo(() => editableSegments, [editableSegments]);
 
   return (
-    <div className="caption-wizard">
+    <div className="caption-wizard" ref={wizardRef}>
       {/* ── Stepper bar ────────────────────────────────── */}
       <nav className="stepper-bar" aria-label="Caption workflow steps">
         {STEPS.map((step, idx) => {

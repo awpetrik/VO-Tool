@@ -36,6 +36,10 @@ async function readSSEStream(res, onEvent) {
   }
 }
 
+function buildSettingsSignature(settings) {
+  return JSON.stringify(settings);
+}
+
 function CheckIcon() {
   return (
     <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -58,6 +62,8 @@ function Enhance({ setToast }) {
   const [activePreset, setActivePreset] = useState("Podcast");
   const [activeStep, setActiveStep] = useState(1);
   const [completedSteps, setCompletedSteps] = useState(new Set());
+  const [lastProcessedSettingsSignature, setLastProcessedSettingsSignature] = useState("");
+  const [rerunReason, setRerunReason] = useState("");
   const [settings, setSettings] = useState({
     noise_reduction: 80,
     clarity: 70,
@@ -67,6 +73,8 @@ function Enhance({ setToast }) {
   });
   const originalUrlRef = useRef("");
   const enhancedUrlRef = useRef("");
+  const wizardRef = useRef(null);
+  const currentSettingsSignature = buildSettingsSignature(settings);
 
   const markDone = (stepId) =>
     setCompletedSteps((prev) => new Set([...prev, stepId]));
@@ -77,8 +85,19 @@ function Enhance({ setToast }) {
     return stepId <= Math.max(...completedSteps) + 1;
   };
 
+  const scrollToWizard = () => {
+    requestAnimationFrame(() => {
+      if (!wizardRef.current) return;
+      const rect = wizardRef.current.getBoundingClientRect();
+      const scrollTarget = window.scrollY + rect.top - 76;
+      window.scrollTo({ top: Math.max(0, scrollTarget), behavior: "smooth" });
+    });
+  };
+
   const goTo = (stepId) => {
-    if (canAccess(stepId)) setActiveStep(stepId);
+    if (!canAccess(stepId)) return;
+    setActiveStep(stepId);
+    scrollToWizard();
   };
 
   const revokeManagedUrl = (ref, nextUrl = "") => {
@@ -96,11 +115,14 @@ function Enhance({ setToast }) {
     setProgressPct(0);
   };
 
-  const handleAudioReady = (file, url) => {
-    revokeManagedUrl(originalUrlRef, url || "");
+  const handleAudioReady = (file) => {
+    const nextOriginalUrl = file ? URL.createObjectURL(file) : "";
+    revokeManagedUrl(originalUrlRef, nextOriginalUrl);
     setOriginalFile(file);
-    setOriginalUrl(url || "");
+    setOriginalUrl(nextOriginalUrl);
     clearEnhancedResult();
+    setLastProcessedSettingsSignature("");
+    setRerunReason("");
 
     if (file) {
       setCompletedSteps(new Set([1]));
@@ -122,6 +144,21 @@ function Enhance({ setToast }) {
   }, [enhancedBlob]);
 
   useEffect(() => {
+    if (!lastProcessedSettingsSignature || lastProcessedSettingsSignature === currentSettingsSignature) {
+      return;
+    }
+
+    clearEnhancedResult();
+    setCompletedSteps((prev) => new Set(Array.from(prev).filter((stepId) => stepId <= 2)));
+    setLastProcessedSettingsSignature("");
+    setRerunReason("Settings changed. Run enhancement again to refresh the compare and export result.");
+
+    if (activeStep > 3) {
+      setActiveStep(3);
+    }
+  }, [activeStep, currentSettingsSignature, lastProcessedSettingsSignature]);
+
+  useEffect(() => {
     return () => {
       revokeManagedUrl(originalUrlRef, "");
       revokeManagedUrl(enhancedUrlRef, "");
@@ -137,6 +174,7 @@ function Enhance({ setToast }) {
     setIsProcessing(true);
     setProgressLog([]);
     setProgressPct(0);
+    setRerunReason("");
 
     try {
       const formData = new FormData();
@@ -170,6 +208,7 @@ function Enhance({ setToast }) {
       revokeManagedUrl(enhancedUrlRef, url);
       setEnhancedBlob(blob);
       setEnhancedUrl(url);
+      setLastProcessedSettingsSignature(currentSettingsSignature);
       setToast({ type: "success", title: "Done", message: "Audio enhanced successfully." });
     } catch (error) {
       setToast({ type: "error", title: "Error", message: error.message });
@@ -184,12 +223,15 @@ function Enhance({ setToast }) {
 
   return (
     <div className="page-wrap page-wrap-wide">
-      <button className="back-link" onClick={() => navigate("/")}>
-        &lt;- Back to Home
-      </button>
-      <h2>Enhance Voice</h2>
+      <div className="page-header">
+        <button className="back-link" onClick={() => navigate("/")} aria-label="Back to Home">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>
+          Back
+        </button>
+        <h2 className="page-title">Enhance Voice</h2>
+      </div>
 
-      <div className="caption-wizard">
+      <div className="caption-wizard" ref={wizardRef}>
         <nav className="stepper-bar" aria-label="Enhancement workflow steps">
           {STEPS.map((step, idx) => {
             const done = completedSteps.has(step.id);
@@ -289,7 +331,6 @@ function Enhance({ setToast }) {
                       <strong>{presetLabel}</strong>
                     </div>
                   </div>
-                  <audio controls src={originalUrl} className="full-audio" />
                   <WaveformViewer originalUrl={originalUrl} enhancedUrl={enhancedUrl} embedded showTitle={false} />
                 </div>
               </div>
@@ -334,6 +375,9 @@ function Enhance({ setToast }) {
               >
                 {isProcessing ? "Enhancing your audio…" : "Enhance Audio"}
               </button>
+              {rerunReason && !isProcessing && (
+                <p className="inline-status-note">{rerunReason}</p>
+              )}
               {isProcessing && <div className="shimmer-bar" aria-hidden="true" />}
               {(isProcessing || progressLog.length > 0) && (
                 <div className="progress-log" role="log" aria-live="polite">
@@ -376,7 +420,7 @@ function Enhance({ setToast }) {
                   <h3>Review &amp; compare</h3>
                 </div>
                 <div className="caption-summary-pills">
-                  <span className="pill-badge primary">{presetLabel}</span>
+                  <span className="pill-badge muted">{presetLabel}</span>
                   <span className="pill-badge muted">{format}</span>
                   <button type="button" className="btn btn-primary" onClick={() => { markDone(4); goTo(5); }}>
                     Done — Export
@@ -386,7 +430,6 @@ function Enhance({ setToast }) {
               <div className="review-workspace">
                 <div className="review-content-stack">
                   <ABCompare originalUrl={originalUrl} enhancedUrl={enhancedUrl} embedded showTitle={false} />
-                  <WaveformViewer originalUrl={originalUrl} enhancedUrl={enhancedUrl} embedded showTitle={false} />
                 </div>
                 <aside className="review-player-panel">
                   <p className="field-label">Enhancement summary</p>

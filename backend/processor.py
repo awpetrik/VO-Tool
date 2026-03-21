@@ -1,6 +1,8 @@
 import io
 import json
 import tempfile
+import threading
+import time
 import uuid
 from collections.abc import Generator
 from typing import Any
@@ -16,8 +18,39 @@ from pedalboard import Compressor, HighpassFilter, PeakFilter, Pedalboard
 
 router = APIRouter()
 
-# Temporary in-memory store: token → WAV bytes. Single-user tool — no TTL needed.
-_result_store: dict[str, bytes] = {}
+# Temporary in-memory store with safeguards: token -> (wav_bytes, created_at_monotonic)
+_result_store: dict[str, tuple[bytes, float]] = {}
+_result_store_lock = threading.Lock()
+RESULT_TTL_SECONDS = 15 * 60
+MAX_RESULT_STORE_ITEMS = 32
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def _clamp_percent(value: Any, default: int) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    return max(0.0, min(1.0, number / 100.0))
+
+
+def _cleanup_result_store(now: float | None = None) -> None:
+    current = now if now is not None else time.monotonic()
+    expired = [
+        token
+        for token, (_, created_at) in _result_store.items()
+        if current - created_at > RESULT_TTL_SECONDS
+    ]
+    for token in expired:
+        _result_store.pop(token, None)
+
+    if len(_result_store) <= MAX_RESULT_STORE_ITEMS:
+        return
+
+    oldest_first = sorted(_result_store.items(), key=lambda item: item[1][1])
+    overflow = len(_result_store) - MAX_RESULT_STORE_ITEMS
+    for token, _ in oldest_first[:overflow]:
+        _result_store.pop(token, None)
 
 
 def _sse(step: str, label: str, pct: int, extra: dict[str, Any] | None = None) -> str:
@@ -35,14 +68,17 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
         raise HTTPException(status_code=400, detail="Invalid settings JSON") from exc
 
     contents = await file.read()
+    await file.close()
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded file is too large")
 
     filename = file.filename or "audio"
-    noise_reduction = float(parsed_settings.get("noise_reduction", 80)) / 100.0
-    clarity = float(parsed_settings.get("clarity", 70)) / 100.0
-    de_reverb = float(parsed_settings.get("de_reverb", 30)) / 100.0
-    compression = float(parsed_settings.get("compression", 70)) / 100.0
+    noise_reduction = _clamp_percent(parsed_settings.get("noise_reduction", 80), 80)
+    clarity = _clamp_percent(parsed_settings.get("clarity", 70), 70)
+    de_reverb = _clamp_percent(parsed_settings.get("de_reverb", 30), 30)
+    compression = _clamp_percent(parsed_settings.get("compression", 70), 70)
     normalize_enabled = bool(parsed_settings.get("normalize", True))
 
     def generate() -> Generator[str, None, None]:
@@ -88,7 +124,11 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
             sf.write(buf, processed, sr, format="WAV")
 
             token = uuid.uuid4().hex
-            _result_store[token] = buf.getvalue()
+            payload = buf.getvalue()
+            now = time.monotonic()
+            with _result_store_lock:
+                _cleanup_result_store(now)
+                _result_store[token] = (payload, now)
             yield _sse("done", "Enhancement complete!", 100, {"token": token})
 
         except Exception as exc:  # noqa: BLE001
@@ -103,9 +143,14 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
 
 @router.get("/enhance/result/{token}")
 async def get_enhance_result(token: str) -> StreamingResponse:
-    wav = _result_store.pop(token, None)
-    if wav is None:
+    with _result_store_lock:
+        _cleanup_result_store()
+        item = _result_store.pop(token, None)
+
+    if item is None:
         raise HTTPException(status_code=404, detail="Result not found or already downloaded")
+
+    wav, _created_at = item
     return StreamingResponse(
         io.BytesIO(wav),
         media_type="audio/wav",

@@ -1,12 +1,20 @@
 import { useNavigate } from "react-router-dom";
 
+function ArrowRight() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ marginLeft: 4 }}>
+      <path d="M3 8h10M9 4l4 4-4 4"/>
+    </svg>
+  );
+}
+
 function FeatureCards() {
   const navigate = useNavigate();
 
   return (
     <section className="feature-section">
       <div className="feature-grid">
-        <article className="feature-card">
+        <article className="feature-card feature-card-primary">
           <div className="icon-box primary" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="9" y="2" width="6" height="12" rx="3" />
@@ -18,7 +26,7 @@ function FeatureCards() {
           <h3>Enhance Voice</h3>
           <p>Remove background noise, echo, and improve clarity</p>
           <button className="btn btn-primary" onClick={() => navigate("/enhance")}>
-            Start enhancing
+            Start enhancing <ArrowRight />
           </button>
         </article>
 
@@ -35,7 +43,7 @@ function FeatureCards() {
           <h3>Generate Caption</h3>
           <p>Accurate word-level or line-level SRT captions</p>
           <button className="btn btn-accent" onClick={() => navigate("/caption")}>
-            Start captioning
+            Start captioning <ArrowRight />
           </button>
         </article>
 
@@ -50,7 +58,7 @@ function FeatureCards() {
           <h3>Before &amp; After</h3>
           <p>Compare original and enhanced audio side by side</p>
           <button className="btn btn-outline" onClick={() => navigate("/enhance")}>
-            Try comparing
+            Try comparing <ArrowRight />
           </button>
         </article>
       </div>
@@ -58,7 +66,7 @@ function FeatureCards() {
       <div className="feature-rows">
         <div className="feature-row-item">
           <span className="feature-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="9" />
               <path d="M3 12h18" />
               <path d="M12 3a15 15 0 0 1 0 18" />
@@ -72,7 +80,7 @@ function FeatureCards() {
         </div>
         <div className="feature-row-item">
           <span className="feature-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <path d="M14 2v6h6" />
             </svg>
@@ -84,7 +92,7 @@ function FeatureCards() {
         </div>
         <div className="feature-row-item">
           <span className="feature-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M4 21v-7" />
               <path d="M4 10V3" />
               <path d="M12 21v-4" />
