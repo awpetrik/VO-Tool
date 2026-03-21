@@ -7,7 +7,7 @@ import EnhancementControls from "../components/EnhancementControls";
 import ABCompare from "../components/ABCompare";
 import DownloadButton from "../components/DownloadButton";
 
-const API_BASE = "http://localhost:8001";
+const API_BASE = "http://localhost:8000";
 
 const STEPS = [
   { id: 1, label: "Source" },

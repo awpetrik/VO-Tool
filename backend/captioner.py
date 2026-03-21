@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import tempfile
@@ -249,20 +250,27 @@ async def caption_audio(
                     device=device,
                 )
 
-                yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
-                transcribe_opts: dict[str, Any] = {
-                    "language": None if language == "auto" else language,
-                    "word_timestamps": True,
-                    "task": "transcribe",
-                }
-                # MPS/CPU are more stable with fp16 disabled.
-                if device in {"cpu", "mps"}:
-                    transcribe_opts["fp16"] = False
+                try:
+                    yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
+                    transcribe_opts: dict[str, Any] = {
+                        "language": None if language == "auto" else language,
+                        "word_timestamps": True,
+                        "task": "transcribe",
+                    }
+                    # MPS/CPU are more stable with fp16 disabled.
+                    if device in {"cpu", "mps"}:
+                        transcribe_opts["fp16"] = False
 
-                result = model_instance.transcribe(
-                    tmp.name,
-                    **transcribe_opts,
-                )
+                    result = model_instance.transcribe(
+                        tmp.name,
+                        **transcribe_opts,
+                    )
+                finally:
+                    # Clean up model from memory immediately after transcription
+                    del model_instance
+                    if device == "cuda":
+                        torch.cuda.empty_cache()
+                    gc.collect()
 
             yield _sse("segments", "Building caption segments…", 85)
             detected = str(result.get("language") or "unknown")

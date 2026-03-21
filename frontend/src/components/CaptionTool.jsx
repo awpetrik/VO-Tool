@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Recorder from "./Recorder";
 import Uploader from "./Uploader";
 
-const API_BASE = "http://localhost:8001";
+const API_BASE = "http://localhost:8000";
 const CAPTION_DRAFT_KEY = "voxora:caption-draft:v1";
 const WHISPER_MODEL_OPTIONS = ["tiny", "base", "small", "large-v3"];
 const AUDIO_DRAFT_DB = "voxora-caption-audio-db";
@@ -198,6 +198,7 @@ function CaptionTool({ setToast }) {
   const reviewListRef = useRef(null);
   const rowRefs = useRef(new Map());
   const wizardRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   const markDone = (stepId) =>
     setCompletedSteps((prev) => new Set([...prev, stepId]));
@@ -346,6 +347,16 @@ function CaptionTool({ setToast }) {
     };
   }, []);
 
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!result || !editableSegments.length) return;
 
@@ -436,6 +447,11 @@ function CaptionTool({ setToast }) {
     setProgressPct(0);
     setModelDownloadPct(null);
     setModelDownloadBytes({ downloaded: 0, total: 0 });
+    
+    // Create new AbortController for this request
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -444,7 +460,11 @@ function CaptionTool({ setToast }) {
       formData.append("max_chars", String(maxChars));
       formData.append("model", model);
 
-      const res = await fetch(`${API_BASE}/caption`, { method: "POST", body: formData });
+      const res = await fetch(`${API_BASE}/caption`, { 
+        method: "POST", 
+        body: formData,
+        signal: controller.signal
+      });
       if (!res.ok) throw new Error("Caption request failed.");
 
       let captionResult = null;
@@ -475,8 +495,21 @@ function CaptionTool({ setToast }) {
       setModelStatuses((prev) => ({ ...prev, [model]: true }));
       setToast({ type: "success", title: "Done", message: "Captions generated." });
     } catch (err) {
-      setToast({ type: "error", title: "Error", message: err.message });
+      if (err.name === "AbortError") {
+        setToast({ type: "info", title: "Cancelled", message: "Transcription was cancelled." });
+      } else {
+        setToast({ type: "error", title: "Error", message: err.message });
+      }
     } finally {
+      setLoading(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  const cancelTranscription = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
       setLoading(false);
     }
   };
@@ -728,7 +761,18 @@ function CaptionTool({ setToast }) {
               </div>
             )}
             <div className="step-advance-row">
-              <button type="button" className="btn btn-outline" onClick={() => goTo(2)}>Back</button>
+              {loading ? (
+                <button 
+                  type="button" 
+                  className="btn btn-danger" 
+                  onClick={cancelTranscription}
+                  aria-label="Cancel transcription"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button type="button" className="btn btn-outline" onClick={() => goTo(2)}>Back</button>
+              )}
             </div>
           </section>
         ) : completedSteps.has(3) ? (
