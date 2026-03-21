@@ -857,19 +857,17 @@ function CaptionTool({ setToast }) {
         {/* Step 4 — Review workspace (2-column) */}
         {activeStep === 4 && result && (
           <section className="step-card step-card-review">
-            <header className="step-header step-header-inline">
-              <div>
+            <header className="step-header review-header">
+              <div className="review-header-main">
                 <span className="section-kicker">Step 4</span>
                 <h3>Review &amp; edit</h3>
+                <p className="small-text">Periksa timing dan teks sebelum ekspor final.</p>
               </div>
-              <div className="caption-summary-pills">
+              <div className="caption-summary-pills review-header-meta" role="status" aria-live="polite">
                 <span className="pill-badge primary">{segments.length} entries</span>
                 {result.language_detected && (
                   <span className="pill-badge muted">Detected: {result.language_detected}</span>
                 )}
-                <button type="button" className="btn btn-primary" onClick={() => { markDone(4); goTo(5); }}>
-                  Done — Export
-                </button>
               </div>
             </header>
             <div className="review-workspace">
@@ -895,7 +893,7 @@ function CaptionTool({ setToast }) {
                       </div>
                       <button
                         type="button"
-                        className="pill"
+                        className="pill review-preview-btn"
                         aria-label={`Preview segment ${idx + 1}`}
                         onClick={() => {
                           if (audioRef.current) {
@@ -968,9 +966,24 @@ function CaptionTool({ setToast }) {
                 <p className="review-player-hint small-text">
                   Click Preview on any row to jump to that moment in the audio.
                 </p>
-                <button type="button" className="btn btn-outline btn-full" onClick={clearDraft}>
-                  Clear saved draft
-                </button>
+                <div className="review-rail-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-full"
+                    onClick={() => {
+                      markDone(4);
+                      goTo(5);
+                    }}
+                  >
+                    Done — Export
+                  </button>
+                  <button type="button" className="btn btn-outline btn-full" onClick={() => goTo(3)}>
+                    Back to Generate
+                  </button>
+                  <button type="button" className="btn btn-outline btn-full review-clear-btn" onClick={clearDraft}>
+                    Clear saved draft
+                  </button>
+                </div>
               </aside>
             </div>
           </section>
