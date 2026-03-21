@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
+import multiprocessing as mp
 import os
 import tempfile
 import urllib.request
@@ -121,6 +122,86 @@ def _sse(step: str, label: str, pct: int, extra: dict[str, Any] | None = None) -
     if extra:
         payload.update(extra)
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _run_whisper_job(
+    *,
+    audio_path: str,
+    model: str,
+    language: str,
+    granularity: str,
+    max_chars: int,
+    cache_root: str,
+    device: str,
+    result_path: str,
+) -> None:
+    model_instance = whisper.load_model(
+        model,
+        download_root=cache_root,
+        device=device,
+    )
+
+    try:
+        transcribe_opts: dict[str, Any] = {
+            "language": None if language == "auto" else language,
+            "word_timestamps": True,
+            "task": "transcribe",
+            "beam_size": 1 if model == "large-v3" else 5,
+            "best_of": 1,
+            "temperature": (0.0,),
+            "condition_on_previous_text": False,
+        }
+        if device in {"cpu", "mps"}:
+            transcribe_opts["fp16"] = False
+
+        with torch.inference_mode():
+            result = model_instance.transcribe(audio_path, **transcribe_opts)
+
+        detected = str(result.get("language") or "unknown")
+        raw_segments = result.get("segments", [])
+
+        words: list[dict[str, Any]] = []
+        for segment in raw_segments:
+            for word in segment.get("words", []):
+                words.append(
+                    {
+                        "word": str(word.get("word", "")).strip(),
+                        "start": float(word.get("start", segment.get("start", 0.0))),
+                        "end": float(word.get("end", segment.get("end", 0.0))),
+                    }
+                )
+
+        if not words:
+            segments = [
+                {
+                    "start": float(seg.get("start", 0.0)),
+                    "end": float(seg.get("end", 0.0)),
+                    "text": str(seg.get("text", "")).strip(),
+                    "words": [],
+                }
+                for seg in raw_segments
+            ]
+        elif granularity == "word":
+            segments = [
+                {"start": w["start"], "end": w["end"], "text": w["word"], "words": [w]}
+                for w in words
+            ]
+        else:
+            segments = line_segments_from_words(words, max(30, min(80, int(max_chars))))
+
+        payload = {
+            "language_detected": detected,
+            "segments": segments,
+        }
+        with open(result_path, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp)
+    finally:
+        del model_instance
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+        gc.collect()
 
 
 def stream_model_download_events(
@@ -268,102 +349,65 @@ async def caption_audio(
                 yield _sse("model", "Using CPU low-memory mode for large-v3 on this device…", 52)
 
             yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
-            model_instance = whisper.load_model(
-                model,
-                download_root=cache_root,
-                device=device,
-            )
+            yield _sse("transcribe", "Transcribing audio in isolated worker…", 65)
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix="_caption_result.json") as tmp_result:
+                result_path = tmp_result.name
 
             try:
-                yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
-                transcribe_opts: dict[str, Any] = {
-                    "language": None if language == "auto" else language,
-                    "word_timestamps": granularity == "word",
-                    "task": "transcribe",
-                    "beam_size": 1 if model == "large-v3" else 5,
-                    "best_of": 1,
-                    "temperature": (0.0,),
-                    "condition_on_previous_text": False,
-                }
-                if device in {"cpu", "mps"}:
-                    transcribe_opts["fp16"] = False
+                ctx = mp.get_context("spawn")
+                process = ctx.Process(
+                    target=_run_whisper_job,
+                    kwargs={
+                        "audio_path": temp_input_path,
+                        "model": model,
+                        "language": language,
+                        "granularity": granularity,
+                        "max_chars": int(max_chars),
+                        "cache_root": cache_root,
+                        "device": device,
+                        "result_path": result_path,
+                    },
+                )
+                process.start()
+                while process.is_alive():
+                    process.join(timeout=0.25)
 
-                with torch.inference_mode():
-                    result = model_instance.transcribe(
-                        temp_input_path,
-                        **transcribe_opts,
-                    )
-            except RuntimeError as exc:
-                out_of_memory = "out of memory" in str(exc).lower() or "mps" in str(exc).lower()
-                if out_of_memory and device != "cpu":
-                    yield _sse("model", "Memory pressure detected, retrying on CPU low-memory mode…", 60)
-                    del model_instance
-                    if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-                        torch.mps.empty_cache()
-                    gc.collect()
-
-                    model_instance = whisper.load_model(
-                        model,
-                        download_root=cache_root,
-                        device="cpu",
-                    )
-                    transcribe_opts = {
-                        "language": None if language == "auto" else language,
-                        "word_timestamps": granularity == "word",
-                        "task": "transcribe",
-                        "beam_size": 1,
-                        "best_of": 1,
-                        "temperature": (0.0,),
-                        "condition_on_previous_text": False,
-                        "fp16": False,
-                    }
-                    with torch.inference_mode():
-                        result = model_instance.transcribe(
-                            temp_input_path,
-                            **transcribe_opts,
+                if process.exitcode != 0:
+                    if device != "cpu":
+                        yield _sse("model", "Worker failed on current device, retrying on CPU low-memory mode…", 60)
+                        process = ctx.Process(
+                            target=_run_whisper_job,
+                            kwargs={
+                                "audio_path": temp_input_path,
+                                "model": model,
+                                "language": language,
+                                "granularity": granularity,
+                                "max_chars": int(max_chars),
+                                "cache_root": cache_root,
+                                "device": "cpu",
+                                "result_path": result_path,
+                            },
                         )
-                else:
-                    raise
+                        process.start()
+                        while process.is_alive():
+                            process.join(timeout=0.25)
+                        if process.exitcode != 0:
+                            raise RuntimeError("Transcription worker failed on CPU mode")
+                    else:
+                        raise RuntimeError("Transcription worker failed")
+
+                with open(result_path, "r", encoding="utf-8") as fp:
+                    worker_payload = json.load(fp)
             finally:
-                del model_instance
-                if device == "cuda":
-                    torch.cuda.empty_cache()
-                if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-                    torch.mps.empty_cache()
-                gc.collect()
+                try:
+                    os.remove(result_path)
+                except OSError:
+                    pass
 
             yield _sse("segments", "Building caption segments…", 85)
-            detected = str(result.get("language") or "unknown")
-            raw_segments = result.get("segments", [])
-
-            words: list[dict[str, Any]] = []
-            for segment in raw_segments:
-                for word in segment.get("words", []):
-                    words.append(
-                        {
-                            "word": str(word.get("word", "")).strip(),
-                            "start": float(word.get("start", segment.get("start", 0.0))),
-                            "end": float(word.get("end", segment.get("end", 0.0))),
-                        }
-                    )
-
-            if not words:
-                segments = [
-                    {
-                        "start": float(seg.get("start", 0.0)),
-                        "end": float(seg.get("end", 0.0)),
-                        "text": str(seg.get("text", "")).strip(),
-                        "words": [],
-                    }
-                    for seg in raw_segments
-                ]
-            elif granularity == "word":
-                segments = [
-                    {"start": w["start"], "end": w["end"], "text": w["word"], "words": [w]}
-                    for w in words
-                ]
-            else:
-                segments = line_segments_from_words(words, max(30, min(80, int(max_chars))))
+            detected = str(worker_payload.get("language_detected") or "unknown")
+            segments = worker_payload.get("segments", [])
 
             srt = build_srt(segments)
 
