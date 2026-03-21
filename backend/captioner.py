@@ -16,6 +16,8 @@ from fastapi.responses import StreamingResponse
 router = APIRouter()
 
 SUPPORTED_MODELS = ("tiny", "base", "small", "large-v3")
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+FORCE_CPU_FOR_LARGE_V3 = os.getenv("VOXORA_FORCE_CPU_FOR_LARGE_V3", "1") == "1"
 
 
 def detect_whisper_device() -> str:
@@ -46,6 +48,13 @@ def is_model_downloaded(model_name: str, download_root: str | None = None) -> bo
     root = download_root or whisper_cache_dir()
     target = model_download_target(model_name, root)
     return bool(target and os.path.isfile(target))
+
+
+def pick_transcription_device(model_name: str) -> str:
+    detected = detect_whisper_device()
+    if model_name == "large-v3" and detected == "mps" and FORCE_CPU_FOR_LARGE_V3:
+        return "cpu"
+    return detected
 
 
 def seconds_to_srt_time(seconds: float) -> str:
@@ -211,10 +220,6 @@ async def caption_audio(
     max_chars: int = Form(50),
     model: str = Form("small"),
 ) -> StreamingResponse:
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
     if language not in {"id", "en", "auto"}:
         raise HTTPException(status_code=400, detail="Unsupported language")
 
@@ -225,75 +230,107 @@ async def caption_audio(
         raise HTTPException(status_code=400, detail="Unsupported model")
 
     filename = file.filename or "audio"
+    temp_input_path = ""
+    total_bytes = 0
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
+        temp_input_path = tmp.name
+        while True:
+            chunk = await file.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            tmp.write(chunk)
+
+    if total_bytes == 0:
+        try:
+            os.remove(temp_input_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    await file.close()
 
     def generate() -> Generator[str, None, None]:
         try:
             yield _sse("read", "Reading audio file…", 10)
-            with tempfile.NamedTemporaryFile(delete=True, suffix=f"_{filename}") as tmp:
-                tmp.write(contents)
-                tmp.flush()
-
-                cache_root = whisper_cache_dir()
-                if not is_model_downloaded(model, cache_root):
-                    yield from stream_model_download_events(
-                        model_name=model,
-                        start_pct=20,
-                        end_pct=50,
-                        download_root=cache_root,
-                    )
-
-                device = detect_whisper_device()
-                yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
-                
-                # For M2 Mac with limited RAM, optimize model loading
-                # Enable memory optimizations for M2 Mac (MPS)
-                if device == "mps":
-                    # MPS supports fp16 and it's more memory efficient
-                    # Also reduce computational overhead
-                    torch.set_default_device(device)
-                    if hasattr(torch.mps, "empty_cache"):
-                        torch.mps.empty_cache()
-                
-                model_instance = whisper.load_model(
-                    model,
+            cache_root = whisper_cache_dir()
+            if not is_model_downloaded(model, cache_root):
+                yield from stream_model_download_events(
+                    model_name=model,
+                    start_pct=20,
+                    end_pct=50,
                     download_root=cache_root,
-                    device=device,
                 )
 
-                try:
-                    yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
-                    transcribe_opts: dict[str, Any] = {
-                        "language": None if language == "auto" else language,
-                        "word_timestamps": True,
-                        "task": "transcribe",
-                        # Optimizations for limited RAM on M2 Mac
-                        "beam_size": 1 if model == "large-v3" else 5,  # Reduce beam size for large model
-                        "best_of": 1,  # Disable best_of for memory efficiency
-                        "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),  # Use fewer temperature samples
-                        "compression_ratio_threshold": 2.4,  # Threshold for gzip compression
-                        "logprob_threshold": -1.0,  # Lower threshold for memory efficiency
-                    }
-                    
-                    # Enable fp16 on MPS for better memory usage
-                    if device == "mps":
-                        transcribe_opts["fp16"] = True
-                    elif device == "cpu":
-                        transcribe_opts["fp16"] = False
+            device = pick_transcription_device(model)
+            if model == "large-v3" and device == "cpu":
+                yield _sse("model", "Using CPU low-memory mode for large-v3 on this device…", 52)
 
-                    # Run transcription with inference mode for memory efficiency
-                    with torch.inference_mode():
-                        result = model_instance.transcribe(
-                            tmp.name,
-                            **transcribe_opts,
-                        )
-                finally:
-                    # Clean up model from memory immediately after transcription
+            yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
+            model_instance = whisper.load_model(
+                model,
+                download_root=cache_root,
+                device=device,
+            )
+
+            try:
+                yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
+                transcribe_opts: dict[str, Any] = {
+                    "language": None if language == "auto" else language,
+                    "word_timestamps": granularity == "word",
+                    "task": "transcribe",
+                    "beam_size": 1 if model == "large-v3" else 5,
+                    "best_of": 1,
+                    "temperature": (0.0,),
+                    "condition_on_previous_text": False,
+                }
+                if device in {"cpu", "mps"}:
+                    transcribe_opts["fp16"] = False
+
+                with torch.inference_mode():
+                    result = model_instance.transcribe(
+                        temp_input_path,
+                        **transcribe_opts,
+                    )
+            except RuntimeError as exc:
+                out_of_memory = "out of memory" in str(exc).lower() or "mps" in str(exc).lower()
+                if out_of_memory and device != "cpu":
+                    yield _sse("model", "Memory pressure detected, retrying on CPU low-memory mode…", 60)
                     del model_instance
-                    if device == "cuda":
-                        torch.cuda.empty_cache()
-                    elif device == "mps" and hasattr(torch.mps, "empty_cache"):
+                    if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                         torch.mps.empty_cache()
                     gc.collect()
+
+                    model_instance = whisper.load_model(
+                        model,
+                        download_root=cache_root,
+                        device="cpu",
+                    )
+                    transcribe_opts = {
+                        "language": None if language == "auto" else language,
+                        "word_timestamps": granularity == "word",
+                        "task": "transcribe",
+                        "beam_size": 1,
+                        "best_of": 1,
+                        "temperature": (0.0,),
+                        "condition_on_previous_text": False,
+                        "fp16": False,
+                    }
+                    with torch.inference_mode():
+                        result = model_instance.transcribe(
+                            temp_input_path,
+                            **transcribe_opts,
+                        )
+                else:
+                    raise
+            finally:
+                del model_instance
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+                if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                    torch.mps.empty_cache()
+                gc.collect()
 
             yield _sse("segments", "Building caption segments…", 85)
             detected = str(result.get("language") or "unknown")
@@ -340,6 +377,11 @@ async def caption_audio(
 
         except Exception as exc:  # noqa: BLE001
             yield _sse("error", f"Transcription failed: {exc}", 0, {"error": str(exc)})
+        finally:
+            try:
+                os.remove(temp_input_path)
+            except OSError:
+                pass
 
     return StreamingResponse(
         generate(),
