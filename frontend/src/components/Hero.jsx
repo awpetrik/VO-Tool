@@ -15,7 +15,10 @@ function Hero() {
           </svg>
           Built for spoken audio
         </span>
-        <h1>Make every<br/>word clearer.</h1>
+        <h1>Make every word clearer.</h1>
+        <p className="hero-lead">
+          Clean dialogue, accurate captions, and faster review in one focused workflow.
+        </p>
         <p>
           Remove noise, shape voice clarity, and create captions that are ready to review, export, and share in Bahasa Indonesia or English.
         </p>
@@ -26,6 +29,11 @@ function Hero() {
           <button className="btn btn-accent-outline btn-hero" onClick={() => navigate("/caption")}>
             Generate Captions
           </button>
+        </div>
+        <div className="hero-proof-row" aria-label="Key capabilities">
+          <span className="proof-chip">Noise cleanup</span>
+          <span className="proof-chip">Hybrid AI captions</span>
+          <span className="proof-chip">Editable .SRT export</span>
         </div>
       </div>
       <div className="hero-illustration">
