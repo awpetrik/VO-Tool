@@ -30,12 +30,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 GEMINI_BATCH_SIZE = 24
 GEMINI_BATCH_CHAR_LIMIT = 2200
-GEMINI_CLOUD_MAX_BYTES = int(os.getenv("GEMINI_CLOUD_MAX_BYTES", str(18 * 1024 * 1024)))
+GEMINI_CLOUD_MAX_BYTES = int(os.getenv("GEMINI_CLOUD_MAX_BYTES", str(100 * 1024 * 1024)))
 
 # Audio conversion settings (for large files)
-AUDIO_CONVERSION_THRESHOLD_BYTES = int(os.getenv("AUDIO_CONVERSION_THRESHOLD_BYTES", str(10 * 1024 * 1024)))
+AUDIO_CONVERSION_THRESHOLD_BYTES = int(os.getenv("AUDIO_CONVERSION_THRESHOLD_BYTES", str(5 * 1024 * 1024)))
 AUDIO_CONVERSION_TARGET_SAMPLE_RATE = 16000
-AUDIO_CONVERSION_TARGET_BITRATE = "128k"
+AUDIO_CONVERSION_TARGET_BITRATE = os.getenv("AUDIO_CONVERSION_TARGET_BITRATE", "48k")
 
 
 def _should_convert_audio(file_size_bytes: int) -> bool:
@@ -46,7 +46,7 @@ def _should_convert_audio(file_size_bytes: int) -> bool:
 def _convert_audio_with_ffmpeg(input_path: str, output_path: str) -> bool:
     """
     Convert audio file using ffmpeg to reduce size.
-    Converts to 16kHz mono WAV with reduced bitrate for transcription.
+    Converts to 16kHz mono AAC/M4A optimized for speech transcription.
     Returns True on success, False on failure.
     """
     try:
@@ -54,10 +54,13 @@ def _convert_audio_with_ffmpeg(input_path: str, output_path: str) -> bool:
             "ffmpeg",
             "-y",  # Overwrite output file
             "-i", input_path,
-            "-acodec", "pcm_s16le",  # PCM codec for WAV
+            "-vn",  # Drop any video track
+            "-sn",  # Drop subtitle track
+            "-dn",  # Drop data track
+            "-c:a", "aac",  # AAC audio codec
             "-ar", str(AUDIO_CONVERSION_TARGET_SAMPLE_RATE),  # 16kHz sample rate
             "-ac", "1",  # Mono (1 channel)
-            "-q:a", "9",  # Quality setting for encoding
+            "-b:a", AUDIO_CONVERSION_TARGET_BITRATE,
             output_path,
         ]
         result = subprocess.run(
@@ -212,10 +215,35 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     try:
         parsed = json.loads(match.group(0))
     except json.JSONDecodeError:
-        return {}
+        # Try to rescue truncated JSON by extracting complete segment objects
+        return _rescue_truncated_json(match.group(0))
     if isinstance(parsed, dict):
         return parsed
     return {}
+
+
+def _rescue_truncated_json(raw: str) -> dict[str, Any]:
+    """Extract language and any complete segments from a truncated JSON response."""
+    detected_lang = "unknown"
+    lang_match = re.search(r'"language"\s*:\s*"([^"]+)"', raw)
+    if lang_match:
+        detected_lang = lang_match.group(1).strip().lower()
+
+    # Extract all complete segment objects {"start":...,"end":...,"text":"..."}
+    segment_pattern = re.compile(
+        r'\{\s*"start"\s*:\s*([\d.]+)\s*,\s*"end"\s*:\s*([\d.]+)\s*,\s*"text"\s*:\s*"((?:[^\\"]|\\.)*)"\s*\}',
+        re.DOTALL,
+    )
+    segments = []
+    for m in segment_pattern.finditer(raw):
+        try:
+            segments.append({"start": float(m.group(1)), "end": float(m.group(2)), "text": m.group(3)})
+        except (ValueError, IndexError):
+            continue
+
+    if not segments:
+        return {}
+    return {"language": detected_lang, "segments": segments}
 
 
 def _chunk_segment_indices(segments: list[dict[str, Any]]) -> list[list[int]]:
@@ -411,7 +439,7 @@ def _gemini_cloud_transcribe(
         "generationConfig": {
             "temperature": 0.0,
             "topP": 0.1,
-            "maxOutputTokens": 4096,
+            "maxOutputTokens": 65536,
         },
     }
 
@@ -419,7 +447,7 @@ def _gemini_cloud_transcribe(
         f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
         f"?key={GEMINI_API_KEY}"
     )
-    resp = requests.post(url, json=body, timeout=120)
+    resp = requests.post(url, json=body, timeout=180)
     resp.raise_for_status()
     payload = resp.json()
     raw_text = (
@@ -757,13 +785,14 @@ async def caption_audio(
     # Check if file should be converted to reduce size
     temp_converted_path = ""
     if _should_convert_audio(total_bytes):
-        temp_converted = tempfile.NamedTemporaryFile(delete=False, suffix="_converted.wav")
+        temp_converted = tempfile.NamedTemporaryFile(delete=False, suffix="_converted.m4a")
         temp_converted_path = temp_converted.name
         temp_converted.close()
 
     def generate() -> Generator[str, None, None]:
         converted_audio_path = temp_input_path  # Default to original file
-        
+        effective_mime_type = mime_type  # Will be updated if conversion happens
+
         try:
             # Convert audio if needed
             if temp_converted_path:
@@ -772,9 +801,10 @@ async def caption_audio(
                     converted_size = os.path.getsize(temp_converted_path)
                     yield _sse("convert", f"Audio optimized ({converted_size / 1024 / 1024:.1f}MB)…", 18)
                     converted_audio_path = temp_converted_path
+                    effective_mime_type = "audio/mp4"  # Converted output is M4A container
                 else:
                     yield _sse("convert", "Audio optimization skipped, using original…", 18)
-            
+
             yield _sse("read", "Reading audio file…", 20)
 
             if mode == "cloud":
@@ -782,7 +812,7 @@ async def caption_audio(
                 yield _sse("transcribe", "Uploading audio to Gemini cloud…", 70)
                 detected, segments, cloud_note = _gemini_cloud_transcribe(
                     audio_path=converted_audio_path,
-                    mime_type=mime_type,
+                    mime_type=effective_mime_type,
                     language=language,
                     granularity=granularity,
                     max_chars=max_chars,
