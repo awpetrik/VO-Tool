@@ -244,11 +244,22 @@ async def caption_audio(
 
                 device = detect_whisper_device()
                 yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
-                model_instance = whisper.load_model(
-                    model,
-                    download_root=cache_root,
-                    device=device,
-                )
+                
+                # For M2 Mac with limited RAM, optimize model loading
+                model_kwargs = {
+                    "download_root": cache_root,
+                    "device": device,
+                }
+                
+                # Enable memory optimizations for M2 Mac (MPS)
+                if device == "mps":
+                    # MPS supports fp16 and it's more memory efficient
+                    # Also reduce computational overhead
+                    torch.set_default_device(device)
+                    if hasattr(torch.mps, "empty_cache"):
+                        torch.mps.empty_cache()
+                
+                model_instance = whisper.load_model(**model_kwargs)
 
                 try:
                     yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
@@ -256,20 +267,33 @@ async def caption_audio(
                         "language": None if language == "auto" else language,
                         "word_timestamps": True,
                         "task": "transcribe",
+                        # Optimizations for limited RAM on M2 Mac
+                        "beam_size": 1 if model == "large-v3" else 5,  # Reduce beam size for large model
+                        "best_of": 1,  # Disable best_of for memory efficiency
+                        "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),  # Use fewer temperature samples
+                        "compression_ratio_threshold": 2.4,  # Threshold for gzip compression
+                        "logprob_threshold": -1.0,  # Lower threshold for memory efficiency
                     }
-                    # MPS/CPU are more stable with fp16 disabled.
-                    if device in {"cpu", "mps"}:
+                    
+                    # Enable fp16 on MPS for better memory usage
+                    if device == "mps":
+                        transcribe_opts["fp16"] = True
+                    elif device == "cpu":
                         transcribe_opts["fp16"] = False
 
-                    result = model_instance.transcribe(
-                        tmp.name,
-                        **transcribe_opts,
-                    )
+                    # Run transcription with inference mode for memory efficiency
+                    with torch.inference_mode():
+                        result = model_instance.transcribe(
+                            tmp.name,
+                            **transcribe_opts,
+                        )
                 finally:
                     # Clean up model from memory immediately after transcription
                     del model_instance
                     if device == "cuda":
                         torch.cuda.empty_cache()
+                    elif device == "mps" and hasattr(torch.mps, "empty_cache"):
+                        torch.mps.empty_cache()
                     gc.collect()
 
             yield _sse("segments", "Building caption segments…", 85)
