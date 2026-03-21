@@ -246,11 +246,6 @@ async def caption_audio(
                 yield _sse("model", f"Loading Whisper '{model}' model on {device.upper()}…", 55)
                 
                 # For M2 Mac with limited RAM, optimize model loading
-                model_kwargs = {
-                    "download_root": cache_root,
-                    "device": device,
-                }
-                
                 # Enable memory optimizations for M2 Mac (MPS)
                 if device == "mps":
                     # MPS supports fp16 and it's more memory efficient
@@ -259,7 +254,11 @@ async def caption_audio(
                     if hasattr(torch.mps, "empty_cache"):
                         torch.mps.empty_cache()
                 
-                model_instance = whisper.load_model(**model_kwargs)
+                model_instance = whisper.load_model(
+                    model,
+                    download_root=cache_root,
+                    device=device,
+                )
 
                 try:
                     yield _sse("transcribe", "Transcribing audio — this may take a moment…", 65)
