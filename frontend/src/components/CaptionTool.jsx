@@ -129,6 +129,16 @@ function formatTime(seconds) {
   return `${h}:${m}:${s},${ms}`;
 }
 
+function formatEta(seconds) {
+  const safe = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
 function getActiveSegmentIndex(segments, currentTime) {
   if (!Array.isArray(segments) || !segments.length) return -1;
 
@@ -181,6 +191,7 @@ function CaptionTool({ setToast }) {
   const [loading, setLoading] = useState(false);
   const [progressLog, setProgressLog] = useState([]);
   const [progressPct, setProgressPct] = useState(0);
+  const [etaSeconds, setEtaSeconds] = useState(null);
   const [modelStatuses, setModelStatuses] = useState({});
   const [modelStatusLoading, setModelStatusLoading] = useState(false);
   const [modelStatusError, setModelStatusError] = useState("");
@@ -199,6 +210,7 @@ function CaptionTool({ setToast }) {
   const rowRefs = useRef(new Map());
   const wizardRef = useRef(null);
   const abortControllerRef = useRef(null);
+  const transcriptionStartRef = useRef(null);
 
   const markDone = (stepId) =>
     setCompletedSteps((prev) => new Set([...prev, stepId]));
@@ -445,8 +457,10 @@ function CaptionTool({ setToast }) {
     setLoading(true);
     setProgressLog([]);
     setProgressPct(0);
+    setEtaSeconds(null);
     setModelDownloadPct(null);
     setModelDownloadBytes({ downloaded: 0, total: 0 });
+    transcriptionStartRef.current = Date.now();
     
     // Create new AbortController for this request
     const controller = new AbortController();
@@ -473,6 +487,17 @@ function CaptionTool({ setToast }) {
       await readSSEStream(res, (event) => {
         if (event.step === "error") { errorMsg = event.error || event.label; return; }
         setProgressPct(event.pct);
+        if (transcriptionStartRef.current && typeof event.pct === "number") {
+          const pct = Math.max(0, Math.min(100, event.pct));
+          if (pct >= 5 && pct < 100) {
+            const elapsedSec = (Date.now() - transcriptionStartRef.current) / 1000;
+            const estimateTotalSec = elapsedSec / (pct / 100);
+            const remainingSec = Math.max(0, estimateTotalSec - elapsedSec);
+            setEtaSeconds(remainingSec);
+          } else if (pct >= 100) {
+            setEtaSeconds(0);
+          }
+        }
         if (typeof event.download_pct === "number") {
           setModelDownloadPct(event.download_pct);
           setModelDownloadBytes({
@@ -502,6 +527,8 @@ function CaptionTool({ setToast }) {
       }
     } finally {
       setLoading(false);
+      setEtaSeconds(null);
+      transcriptionStartRef.current = null;
       abortControllerRef.current = null;
     }
   };
@@ -511,6 +538,8 @@ function CaptionTool({ setToast }) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
       setLoading(false);
+      setEtaSeconds(null);
+      transcriptionStartRef.current = null;
     }
   };
 
@@ -535,6 +564,12 @@ function CaptionTool({ setToast }) {
   const modelDownloadText = modelDownloadBytes.total > 0
     ? `${(modelDownloadBytes.downloaded / (1024 * 1024)).toFixed(1)} / ${(modelDownloadBytes.total / (1024 * 1024)).toFixed(1)} MB`
     : `${(modelDownloadBytes.downloaded / (1024 * 1024)).toFixed(1)} MB`;
+  const roundedProgressPct = Math.max(0, Math.min(100, Math.round(progressPct)));
+  const etaHint = loading
+    ? (roundedProgressPct >= 10 && etaSeconds !== null
+        ? `ETA ~${formatEta(etaSeconds)}`
+        : "ETA calculating...")
+    : "";
   const segments = useMemo(() => editableSegments, [editableSegments]);
 
   return (
@@ -749,6 +784,9 @@ function CaptionTool({ setToast }) {
                 <div className="progress-track" aria-hidden="true">
                   <div className="progress-fill" style={{ width: `${progressPct}%` }} />
                 </div>
+                <p className="small-text">
+                  {roundedProgressPct}% complete{loading ? ` • ${etaHint}` : ""}
+                </p>
                 {progressLog.map((s, i) => (
                   <div
                     key={i}
