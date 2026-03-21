@@ -10,3 +10,5 @@ pyloudnorm
 openai-whisper
 torch
 numpy
+requests
+rich
