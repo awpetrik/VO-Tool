@@ -103,6 +103,7 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
         try:
             yield _sse("read", "Reading audio file…", 10)
             clean_report: dict[str, Any] = {
+                "enabled": {"filler_removal": filler_removal, "silence_trim": silence_trim},
                 "filler_removed": 0,
                 "pause_trimmed": 0,
                 "removed_ms": 0,

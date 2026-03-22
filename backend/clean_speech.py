@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import threading
 from typing import Any
 
 import librosa
 import numpy as np
+import requests
 import whisper
 from pydub import AudioSegment, silence
 
@@ -15,6 +18,8 @@ MIN_CUT_MS = 20
 MIN_PADDING_MS = 30
 MAX_PADDING_MS = 50
 DEFAULT_CROSSFADE_MS = 12
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
 _MODEL_LOCK = threading.Lock()
 _TINY_MODEL: Any = None
@@ -28,6 +33,98 @@ def parse_custom_fillers(custom_fillers: str) -> set[str]:
 
 def _normalize_word(value: str) -> str:
     return re.sub(r"[^\w']+", "", (value or "").strip().lower())
+
+
+def _is_unambiguous_filler(token: str) -> bool:
+    """Allow stretched variants of the strict default filler family.
+
+    Examples: ummm, uhhh, ehhh, eeee, hmmm.
+    """
+    if token in DEFAULT_FILLERS:
+        return True
+    return bool(re.fullmatch(r"u+h+m+|u+h+|u+m+|e+h+|e+|h+m+", token))
+
+
+def _extract_json_array(raw: str) -> list[dict[str, Any]]:
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if not match:
+        return []
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
+def _gemini_validate_ambiguous_fillers(
+    word_segments: list[dict[str, Any]],
+    candidate_indices: list[int],
+    language_hint: str | None,
+) -> set[int]:
+    if not GEMINI_API_KEY or not candidate_indices:
+        return set(candidate_indices)
+
+    lines: list[str] = []
+    for idx in candidate_indices:
+        left = max(0, idx - 3)
+        right = min(len(word_segments), idx + 4)
+        context = " ".join(str(word_segments[i].get("text", "")).strip() for i in range(left, right)).strip()
+        token = str(word_segments[idx].get("text", "")).strip()
+        lines.append(f"{idx}|token={token}|context={context}")
+
+    prompt = (
+        "Decide if each token is an unnecessary spoken filler to remove. "
+        "Remove only if dropping it keeps sentence meaning and grammatical flow. "
+        "Be conservative for Indonesian discourse markers. "
+        "Return ONLY JSON array: [{\"i\":number,\"remove\":boolean}]."
+    )
+    user_input = (
+        f"language_hint={(language_hint or 'auto').strip()}\n"
+        "candidates:\n"
+        + "\n".join(lines)
+    )
+
+    body = {
+        "contents": [{"parts": [{"text": prompt}, {"text": user_input}]}],
+        "generationConfig": {
+            "temperature": 0.0,
+            "topP": 0.8,
+            "maxOutputTokens": 1200,
+        },
+    }
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
+
+    try:
+        resp = requests.post(url, json=body, timeout=35)
+        resp.raise_for_status()
+        data = resp.json()
+        text = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        parsed = _extract_json_array(text)
+        approved: set[int] = set()
+        for item in parsed:
+            i = item.get("i")
+            remove = bool(item.get("remove", False))
+            if isinstance(i, int) and remove:
+                approved.add(i)
+        # If parsing fails or model returns nothing usable, fallback to conservative no-removal.
+        return approved
+    except Exception:
+        # Fallback behavior: keep original custom behavior if API fails.
+        return set(candidate_indices)
 
 
 def _get_tiny_model() -> Any:
@@ -86,15 +183,26 @@ def detect_fillers(
     word_segments: list[dict[str, Any]],
     audio_len_ms: int,
     custom_fillers: set[str] | None = None,
+    language_hint: str | None = None,
 ) -> list[dict[str, Any]]:
-    fillers = set(DEFAULT_FILLERS)
-    if custom_fillers:
-        fillers.update(custom_fillers)
+    custom = set(custom_fillers or set())
+    ambiguous_candidate_indices: list[int] = []
+    approved_ambiguous: set[int] = set()
 
     cuts: list[dict[str, Any]] = []
-    for item in word_segments:
+    for idx, item in enumerate(word_segments):
         token = _normalize_word(str(item.get("text", "")))
-        if token not in fillers:
+        if not token:
+            continue
+
+        is_default = _is_unambiguous_filler(token)
+        is_custom_ambiguous = token in custom and not is_default
+
+        if not is_default and not is_custom_ambiguous:
+            continue
+
+        if is_custom_ambiguous:
+            ambiguous_candidate_indices.append(idx)
             continue
 
         start = int(item.get("start_ms", 0))
@@ -121,6 +229,39 @@ def detect_fillers(
             }
         )
 
+    if ambiguous_candidate_indices:
+        approved_ambiguous = _gemini_validate_ambiguous_fillers(
+            word_segments,
+            ambiguous_candidate_indices,
+            language_hint=language_hint,
+        )
+
+    for idx in ambiguous_candidate_indices:
+        if idx not in approved_ambiguous:
+            continue
+
+        item = word_segments[idx]
+        start = int(item.get("start_ms", 0))
+        end = int(item.get("end_ms", 0))
+        if end <= start:
+            continue
+
+        raw_len = end - start
+        dynamic_pad = int(max(MIN_PADDING_MS, min(MAX_PADDING_MS, raw_len * 0.25)))
+        cut_start = max(0, start + dynamic_pad)
+        cut_end = min(audio_len_ms, end - dynamic_pad)
+        if cut_end - cut_start < MIN_CUT_MS:
+            continue
+
+        cuts.append(
+            {
+                "type": "filler",
+                "text": str(item.get("text", "")).strip(),
+                "start_ms": cut_start,
+                "end_ms": cut_end,
+            }
+        )
+
     return cuts
 
 
@@ -130,29 +271,29 @@ def detect_long_pauses(audio_segment: AudioSegment, max_pause_sec: float = 0.8) 
     if audio_segment.duration_seconds <= 0:
         return []
 
-    silence_thresh = audio_segment.dBFS - 16 if audio_segment.dBFS != float("-inf") else -50
-    nonsilent = silence.detect_nonsilent(
+    silence_thresh = audio_segment.dBFS - 18 if audio_segment.dBFS != float("-inf") else -50
+    silence_regions = silence.detect_silence(
         audio_segment,
-        min_silence_len=120,
+        min_silence_len=160,
         silence_thresh=silence_thresh,
         seek_step=10,
     )
 
-    if len(nonsilent) < 2:
+    if not silence_regions:
         return []
 
     cuts: list[dict[str, Any]] = []
-    for idx in range(len(nonsilent) - 1):
-        left_end = int(nonsilent[idx][1])
-        right_start = int(nonsilent[idx + 1][0])
-        gap = right_start - left_end
+    for region in silence_regions:
+        start_ms = int(region[0])
+        end_ms = int(region[1])
+        gap = end_ms - start_ms
 
         if gap <= target_pause_ms:
             continue
 
         excess = gap - target_pause_ms
-        cut_start = left_end + (excess // 2)
-        cut_end = right_start - (excess // 2)
+        cut_start = start_ms + (excess // 2)
+        cut_end = end_ms - (excess // 2)
 
         if cut_end - cut_start < MIN_CUT_MS:
             continue
@@ -235,7 +376,12 @@ def run_clean_speech(
 
     if filler_removal:
         words = get_word_timestamps(audio_path, language_hint=language_hint)
-        filler_cuts = detect_fillers(words, audio_len_ms=len(segment), custom_fillers=parse_custom_fillers(custom_fillers))
+        filler_cuts = detect_fillers(
+            words,
+            audio_len_ms=len(segment),
+            custom_fillers=parse_custom_fillers(custom_fillers),
+            language_hint=language_hint,
+        )
         cuts.extend(filler_cuts)
 
     if silence_trim:
@@ -244,6 +390,7 @@ def run_clean_speech(
 
     if not cuts:
         return audio_np.astype(np.float32), {
+            "enabled": {"filler_removal": filler_removal, "silence_trim": silence_trim},
             "filler_removed": 0,
             "pause_trimmed": 0,
             "removed_ms": 0,
@@ -267,6 +414,7 @@ def run_clean_speech(
 
     removed_ms = max(0, len(segment) - len(cleaned))
     return pydub_to_numpy(cleaned, sr), {
+        "enabled": {"filler_removal": filler_removal, "silence_trim": silence_trim},
         "filler_removed": len(filler_cuts),
         "pause_trimmed": len(pause_cuts),
         "removed_ms": removed_ms,

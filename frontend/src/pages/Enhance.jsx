@@ -487,9 +487,9 @@ function Enhance({ setToast }) {
                   </div>
 
                   <div className="rp-actions">
-                    {cleanReport && (cleanReport.filler_removed > 0 || cleanReport.pause_trimmed > 0) && (
+                    {cleanReport && (cleanReport.enabled?.filler_removal || cleanReport.enabled?.silence_trim) && (
                       <p className="rp-cuts-report">
-                        {cleanReport.filler_removed || 0} fillers removed · {((cleanReport.removed_ms || 0) / 1000).toFixed(1)}s trimmed
+                        {cleanReport.filler_removed || 0} fillers removed · {cleanReport.pause_trimmed || 0} pauses trimmed · {((cleanReport.removed_ms || 0) / 1000).toFixed(1)}s cut
                       </p>
                     )}
                     <p className="rp-hint">Compare both tracks before exporting.</p>
