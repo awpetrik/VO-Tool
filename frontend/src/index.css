@@ -1135,6 +1135,7 @@ input[type="range"] {
   line-height: 1.3;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -1197,6 +1198,76 @@ input[type="range"] {
   color: var(--color-text-muted);
   margin-top: -2px;
   padding: 0 2px;
+}
+
+/* Clean speech section */
+.ec-clean-card {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border-radius: 10px;
+  border: 1.5px solid var(--color-border);
+  background: var(--color-surface-2);
+}
+
+.ec-clean-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ec-clean-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.ec-clean-subtitle {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.ec-clean-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ec-clean-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.ec-clean-help {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.ec-clean-input-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.ec-clean-input-wrap input {
+  margin-top: 0;
+}
+
+.ec-pause-row {
+  display: grid;
+  gap: 5px;
+}
+
+.ec-pause-row.disabled {
+  opacity: 0.45;
+}
+
+.ec-pause-row.disabled input {
+  cursor: not-allowed;
 }
 
 /* Normalize toggle row */
@@ -2499,6 +2570,17 @@ textarea {
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--color-border);
+}
+
+.rp-cuts-report {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+  border: 1px solid #f6c6a0;
+  border-radius: 8px;
+  padding: 7px 9px;
 }
 
 .rp-hint {

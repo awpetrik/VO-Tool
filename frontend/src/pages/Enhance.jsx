@@ -71,12 +71,19 @@ function Enhance({ setToast }) {
   const [completedSteps, setCompletedSteps] = useState(new Set());
   const [lastProcessedSettingsSignature, setLastProcessedSettingsSignature] = useState("");
   const [rerunReason, setRerunReason] = useState("");
+  const [cleanReport, setCleanReport] = useState(null);
   const [settings, setSettings] = useState({
     noise_reduction: 80,
     clarity: 70,
     de_reverb: 30,
     compression: 70,
     normalize: true,
+    clean_settings: {
+      filler_removal: false,
+      silence_trim: false,
+      max_pause_sec: 0.8,
+      custom_fillers: "",
+    },
   });
   const originalUrlRef = useRef("");
   const enhancedUrlRef = useRef("");
@@ -118,6 +125,7 @@ function Enhance({ setToast }) {
     revokeManagedUrl(enhancedUrlRef, "");
     setEnhancedUrl("");
     setEnhancedBlob(null);
+    setCleanReport(null);
     setProgressLog([]);
     setProgressPct(0);
   };
@@ -193,6 +201,7 @@ function Enhance({ setToast }) {
 
       let token = null;
       let errorMsg = null;
+      let nextCleanReport = null;
 
       await readSSEStream(res, (event) => {
         if (event.step === "error") { errorMsg = event.error || event.label; return; }
@@ -201,6 +210,7 @@ function Enhance({ setToast }) {
           setProgressLog((prev) => [...prev, event]);
         } else {
           token = event.token;
+          nextCleanReport = event.clean_report || null;
         }
       });
 
@@ -215,6 +225,7 @@ function Enhance({ setToast }) {
       revokeManagedUrl(enhancedUrlRef, url);
       setEnhancedBlob(blob);
       setEnhancedUrl(url);
+      setCleanReport(nextCleanReport);
       setLastProcessedSettingsSignature(currentSettingsSignature);
       setToast({ type: "success", title: "Done", message: "Audio enhanced successfully." });
     } catch (error) {
@@ -476,6 +487,11 @@ function Enhance({ setToast }) {
                   </div>
 
                   <div className="rp-actions">
+                    {cleanReport && (cleanReport.filler_removed > 0 || cleanReport.pause_trimmed > 0) && (
+                      <p className="rp-cuts-report">
+                        {cleanReport.filler_removed || 0} fillers removed · {((cleanReport.removed_ms || 0) / 1000).toFixed(1)}s trimmed
+                      </p>
+                    )}
                     <p className="rp-hint">Compare both tracks before exporting.</p>
                     <button type="button" className="btn btn-outline btn-full" onClick={() => goTo(2)}>
                       Adjust settings

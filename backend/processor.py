@@ -16,6 +16,8 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pedalboard import Compressor, HighpassFilter, PeakFilter, Pedalboard
 
+from clean_speech import run_clean_speech
+
 router = APIRouter()
 
 # Temporary in-memory store with safeguards: token -> (wav_bytes, created_at_monotonic)
@@ -75,19 +77,54 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
         raise HTTPException(status_code=413, detail="Uploaded file is too large")
 
     filename = file.filename or "audio"
+    clean_settings = parsed_settings.get("clean_settings", {})
+
+    def _setting(name: str, default: Any) -> Any:
+        if isinstance(clean_settings, dict) and name in clean_settings:
+            return clean_settings.get(name, default)
+        return parsed_settings.get(name, default)
+
     noise_reduction = _clamp_percent(parsed_settings.get("noise_reduction", 80), 80)
     clarity = _clamp_percent(parsed_settings.get("clarity", 70), 70)
     de_reverb = _clamp_percent(parsed_settings.get("de_reverb", 30), 30)
     compression = _clamp_percent(parsed_settings.get("compression", 70), 70)
     normalize_enabled = bool(parsed_settings.get("normalize", True))
+    filler_removal = bool(_setting("filler_removal", False))
+    silence_trim = bool(_setting("silence_trim", False))
+    custom_fillers = str(_setting("custom_fillers", "") or "")
+    language_hint = str(_setting("language_hint", "auto") or "auto")
+    try:
+        max_pause_sec = float(_setting("max_pause_sec", 0.8))
+    except (TypeError, ValueError):
+        max_pause_sec = 0.8
+    max_pause_sec = max(0.2, min(2.5, max_pause_sec))
 
     def generate() -> Generator[str, None, None]:
         try:
             yield _sse("read", "Reading audio file…", 10)
+            clean_report: dict[str, Any] = {
+                "filler_removed": 0,
+                "pause_trimmed": 0,
+                "removed_ms": 0,
+                "cuts_report": [],
+            }
             with tempfile.NamedTemporaryFile(delete=True, suffix=f"_{filename}") as tmp:
                 tmp.write(contents)
                 tmp.flush()
                 signal, sr = librosa.load(tmp.name, sr=None, mono=True)
+
+                if filler_removal or silence_trim:
+                    yield _sse("clean", "Removing fillers & silences…", 22)
+                    signal, clean_report = run_clean_speech(
+                        signal,
+                        sr,
+                        tmp.name,
+                        filler_removal=filler_removal,
+                        silence_trim=silence_trim,
+                        max_pause_sec=max_pause_sec,
+                        custom_fillers=custom_fillers,
+                        language_hint=language_hint,
+                    )
 
             yield _sse("noise", "Reducing background noise…", 35)
             reduced = nr.reduce_noise(
@@ -129,7 +166,15 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
             with _result_store_lock:
                 _cleanup_result_store(now)
                 _result_store[token] = (payload, now)
-            yield _sse("done", "Enhancement complete!", 100, {"token": token})
+            yield _sse(
+                "done",
+                "Enhancement complete!",
+                100,
+                {
+                    "token": token,
+                    "clean_report": clean_report,
+                },
+            )
 
         except Exception as exc:  # noqa: BLE001
             yield _sse("error", f"Processing failed: {exc}", 0, {"error": str(exc)})
