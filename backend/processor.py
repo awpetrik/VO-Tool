@@ -14,7 +14,7 @@ import pyloudnorm as pyln
 import soundfile as sf
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from pedalboard import Compressor, HighpassFilter, PeakFilter, Pedalboard
+from pedalboard import Compressor, HighpassFilter, Limiter, LowpassFilter, NoiseGate, PeakFilter, Pedalboard
 
 from clean_speech import run_clean_speech
 
@@ -115,7 +115,13 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
                 signal, sr = librosa.load(tmp.name, sr=None, mono=True)
 
                 if filler_removal or silence_trim:
-                    yield _sse("clean", "Removing fillers & silences…", 22)
+                    if filler_removal:
+                        yield _sse("clean-filler", "Analyzing word-level fillers…", 16)
+                        if custom_fillers.strip():
+                            yield _sse("clean-gemini", "Gemini is validating ambiguous fillers…", 19)
+                    if silence_trim:
+                        yield _sse("clean-silence", "Analyzing silence gaps…", 21)
+                    yield _sse("clean", "Removing fillers & silences…", 24)
                     signal, clean_report = run_clean_speech(
                         signal,
                         sr,
@@ -126,13 +132,27 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
                         custom_fillers=custom_fillers,
                         language_hint=language_hint,
                     )
+                    yield _sse(
+                        "clean-summary",
+                        (
+                            f"Clean speech: removed {clean_report.get('filler_removed', 0)} fillers, "
+                            f"trimmed {clean_report.get('pause_trimmed', 0)} pauses."
+                        ),
+                        30,
+                    )
 
             yield _sse("noise", "Reducing background noise…", 35)
             reduced = nr.reduce_noise(
                 y=signal, sr=sr, prop_decrease=max(0.0, min(1.0, noise_reduction))
             )
 
-            yield _sse("eq", "Applying clarity and de-reverb…", 55)
+            yield _sse("eq", "Applying tone, noise gate, and dynamics…", 55)
+            gate_threshold_db = -55 + (de_reverb * 18)  # More de-reverb -> more assertive gating.
+            gate_ratio = 1.4 + (de_reverb * 3.2)
+            gate_release_ms = 230 - (de_reverb * 140)
+
+            # Clarity boost can over-emphasize sibilance, so add a gentle high-end tame.
+            high_tame_cutoff_hz = 10800 - (clarity * 1400)
             board = Pedalboard(
                 [
                     HighpassFilter(cutoff_frequency_hz=80 + (de_reverb * 120)),
@@ -140,6 +160,13 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
                         cutoff_frequency_hz=3000 + (clarity * 2000),
                         gain_db=2 + (clarity * 4),
                         q=0.8,
+                    ),
+                    LowpassFilter(cutoff_frequency_hz=max(8500, high_tame_cutoff_hz)),
+                    NoiseGate(
+                        threshold_db=gate_threshold_db,
+                        ratio=gate_ratio,
+                        attack_ms=6,
+                        release_ms=max(70, gate_release_ms),
                     ),
                     Compressor(
                         threshold_db=-22 + (compression * 8),
@@ -157,7 +184,12 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
                 loudness = meter.integrated_loudness(processed)
                 processed = pyln.normalize.loudness(processed, loudness, -14.0)
 
-            yield _sse("encode", "Encoding WAV output…", 90)
+            # Final peak safety ceiling to prevent transient clipping after all processing.
+            yield _sse("limit", "Applying peak limiter…", 85)
+            limiter = Pedalboard([Limiter(threshold_db=-1.0, release_ms=60)])
+            processed = limiter(processed.astype(np.float32), sr)
+
+            yield _sse("encode", "Encoding WAV output…", 92)
             buf = io.BytesIO()
             sf.write(buf, processed, sr, format="WAV")
 

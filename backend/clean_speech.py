@@ -65,9 +65,14 @@ def _gemini_validate_ambiguous_fillers(
     word_segments: list[dict[str, Any]],
     candidate_indices: list[int],
     language_hint: str | None,
-) -> set[int]:
+) -> tuple[set[int], dict[str, Any]]:
     if not GEMINI_API_KEY or not candidate_indices:
-        return set(candidate_indices)
+        return set(candidate_indices), {
+            "used": False,
+            "status": "skipped_no_api_key_or_candidates",
+            "ambiguous_candidates": len(candidate_indices),
+            "approved": len(candidate_indices),
+        }
 
     lines: list[str] = []
     for idx in candidate_indices:
@@ -121,10 +126,20 @@ def _gemini_validate_ambiguous_fillers(
             if isinstance(i, int) and remove:
                 approved.add(i)
         # If parsing fails or model returns nothing usable, fallback to conservative no-removal.
-        return approved
+        return approved, {
+            "used": True,
+            "status": "ok",
+            "ambiguous_candidates": len(candidate_indices),
+            "approved": len(approved),
+        }
     except Exception:
         # Fallback behavior: keep original custom behavior if API fails.
-        return set(candidate_indices)
+        return set(candidate_indices), {
+            "used": True,
+            "status": "fallback_on_error",
+            "ambiguous_candidates": len(candidate_indices),
+            "approved": len(candidate_indices),
+        }
 
 
 def _get_tiny_model() -> Any:
@@ -184,10 +199,16 @@ def detect_fillers(
     audio_len_ms: int,
     custom_fillers: set[str] | None = None,
     language_hint: str | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     custom = set(custom_fillers or set())
     ambiguous_candidate_indices: list[int] = []
     approved_ambiguous: set[int] = set()
+    gemini_meta: dict[str, Any] = {
+        "used": False,
+        "status": "not_needed",
+        "ambiguous_candidates": 0,
+        "approved": 0,
+    }
 
     cuts: list[dict[str, Any]] = []
     for idx, item in enumerate(word_segments):
@@ -230,7 +251,7 @@ def detect_fillers(
         )
 
     if ambiguous_candidate_indices:
-        approved_ambiguous = _gemini_validate_ambiguous_fillers(
+        approved_ambiguous, gemini_meta = _gemini_validate_ambiguous_fillers(
             word_segments,
             ambiguous_candidate_indices,
             language_hint=language_hint,
@@ -262,7 +283,7 @@ def detect_fillers(
             }
         )
 
-    return cuts
+    return cuts, gemini_meta
 
 
 def detect_long_pauses(audio_segment: AudioSegment, max_pause_sec: float = 0.8) -> list[dict[str, Any]]:
@@ -373,10 +394,16 @@ def run_clean_speech(
     cuts: list[dict[str, Any]] = []
     filler_cuts: list[dict[str, Any]] = []
     pause_cuts: list[dict[str, Any]] = []
+    gemini_meta: dict[str, Any] = {
+        "used": False,
+        "status": "not_needed",
+        "ambiguous_candidates": 0,
+        "approved": 0,
+    }
 
     if filler_removal:
         words = get_word_timestamps(audio_path, language_hint=language_hint)
-        filler_cuts = detect_fillers(
+        filler_cuts, gemini_meta = detect_fillers(
             words,
             audio_len_ms=len(segment),
             custom_fillers=parse_custom_fillers(custom_fillers),
@@ -395,6 +422,7 @@ def run_clean_speech(
             "pause_trimmed": 0,
             "removed_ms": 0,
             "cuts_report": [],
+            "gemini": gemini_meta,
         }
 
     cleaned = apply_cuts(segment, cuts, crossfade_ms=DEFAULT_CROSSFADE_MS)
@@ -419,4 +447,5 @@ def run_clean_speech(
         "pause_trimmed": len(pause_cuts),
         "removed_ms": removed_ms,
         "cuts_report": cuts_report,
+        "gemini": gemini_meta,
     }

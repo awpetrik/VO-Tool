@@ -49,6 +49,13 @@ function buildSettingsSignature(settings) {
   return JSON.stringify(settings);
 }
 
+function formatSeconds(seconds) {
+  const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const mins = Math.floor(safe / 60);
+  const secs = (safe % 60).toFixed(2).padStart(5, "0");
+  return `${mins}:${secs}`;
+}
+
 function CheckIcon() {
   return (
     <Check size={12} strokeWidth={2.5} aria-hidden="true" />
@@ -238,6 +245,16 @@ function Enhance({ setToast }) {
   const sourceName = originalFile?.name || "No source selected";
   const presetLabel = activePreset === "Custom" ? "Custom profile" : activePreset;
   const normalizeLabel = settings.normalize ? "Normalize on" : "Normalize off";
+  const cleanSettings = settings.clean_settings || {};
+  const cleanFeatureEnabled = Boolean(cleanSettings.filler_removal || cleanSettings.silence_trim);
+  const willUseGeminiValidation = Boolean(cleanSettings.filler_removal && String(cleanSettings.custom_fillers || "").trim());
+  const cutsReport = Array.isArray(cleanReport?.cuts_report) ? cleanReport.cuts_report : [];
+  const previewCuts = cutsReport.slice(0, 8);
+  const cleanEnabled = Boolean(cleanReport?.enabled?.filler_removal || cleanReport?.enabled?.silence_trim || cleanFeatureEnabled);
+  const fillerTexts = cutsReport
+    .filter((item) => item.type === "filler" && String(item.text || "").trim())
+    .map((item) => String(item.text).trim());
+  const uniqueFillers = Array.from(new Set(fillerTexts.map((item) => item.toLowerCase())));
 
   return (
     <div className="page-wrap page-wrap-wide">
@@ -377,6 +394,8 @@ function Enhance({ setToast }) {
                   <span className="pill-badge muted">{presetLabel}</span>
                   <span className="pill-badge muted">NR {settings.noise_reduction}</span>
                   <span className="pill-badge muted">Clarity {settings.clarity}</span>
+                  {cleanFeatureEnabled && <span className="pill-badge muted">Clean Speech On</span>}
+                  {willUseGeminiValidation && <span className="pill-badge muted">Gemini Validation</span>}
                 </div>
               </header>
               <button
@@ -487,10 +506,47 @@ function Enhance({ setToast }) {
                   </div>
 
                   <div className="rp-actions">
-                    {cleanReport && (cleanReport.enabled?.filler_removal || cleanReport.enabled?.silence_trim) && (
+                    {cleanEnabled && (
                       <p className="rp-cuts-report">
-                        {cleanReport.filler_removed || 0} fillers removed · {cleanReport.pause_trimmed || 0} pauses trimmed · {((cleanReport.removed_ms || 0) / 1000).toFixed(1)}s cut
+                        {(cleanReport?.filler_removed || 0)} fillers removed · {(cleanReport?.pause_trimmed || 0)} pauses trimmed · {(((cleanReport?.removed_ms || 0) / 1000)).toFixed(1)}s cut
                       </p>
+                    )}
+                    {cleanEnabled && (
+                      <p className="rp-cuts-inline">
+                        Words cut: {uniqueFillers.length ? uniqueFillers.join(", ") : "none"}
+                      </p>
+                    )}
+                    {cleanEnabled && (
+                      <details className="rp-change-log">
+                        <summary>See trimmed changes ({cutsReport.length})</summary>
+                        {cleanReport && cutsReport.length > 0 ? (
+                          <>
+                            <ul className="rp-change-list">
+                              {previewCuts.map((item, idx) => {
+                                const start = Number(item.start_ms || 0) / 1000;
+                                const end = Number(item.end_ms || 0) / 1000;
+                                const duration = Math.max(0, end - start);
+                                const kind = item.type === "pause" ? "Pause shortened" : "Filler removed";
+                                const label = item.type === "filler" && item.text ? ` "${String(item.text).trim()}"` : "";
+                                return (
+                                  <li key={`${item.type}-${item.start_ms}-${item.end_ms}-${idx}`}>
+                                    <span className="rp-change-time">{formatSeconds(start)}</span>
+                                    <span className="rp-change-text">{kind}{label}</span>
+                                    <span className="rp-change-delta">-{duration.toFixed(2)}s</span>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                            {cutsReport.length > previewCuts.length && (
+                              <p className="rp-change-more">Showing first {previewCuts.length} of {cutsReport.length} changes.</p>
+                            )}
+                          </>
+                        ) : cleanReport ? (
+                          <p className="rp-change-empty">No word/pause segments were trimmed on this run.</p>
+                        ) : (
+                          <p className="rp-change-empty">Clean Speech is enabled but no clean report was received. Restart backend, then run Enhance again.</p>
+                        )}
+                      </details>
                     )}
                     <p className="rp-hint">Compare both tracks before exporting.</p>
                     <button type="button" className="btn btn-outline btn-full" onClick={() => goTo(2)}>

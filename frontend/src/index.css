@@ -2583,6 +2583,76 @@ textarea {
   padding: 7px 9px;
 }
 
+.rp-cuts-inline {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.rp-change-log {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 8px;
+}
+
+.rp-change-log summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.rp-change-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.rp-change-list li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--color-border);
+}
+
+.rp-change-list li:last-child {
+  border-bottom: none;
+}
+
+.rp-change-time {
+  color: var(--color-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.rp-change-text {
+  color: var(--color-text);
+}
+
+.rp-change-delta {
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.rp-change-more {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.rp-change-empty {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
 .rp-hint {
   font-size: 12px;
   color: var(--color-text-muted);
