@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, ChevronLeft } from "lucide-react";
+import { Check, ChevronLeft, Mic, Radio, Headphones, PhoneCall, Users, SlidersHorizontal } from "lucide-react";
 import Recorder from "../components/Recorder";
 import Uploader from "../components/Uploader";
 import WaveformViewer from "../components/WaveformViewer";
@@ -9,6 +9,14 @@ import ABCompare from "../components/ABCompare";
 import DownloadButton from "../components/DownloadButton";
 
 const API_BASE = "http://localhost:8000";
+
+const REVIEW_ICONS = {
+  Podcast: Radio,
+  "Voice Over": Mic,
+  Vocal: Headphones,
+  "Call Recording": PhoneCall,
+  Interview: Users,
+};
 
 const STEPS = [
   { id: 1, label: "Source" },
@@ -320,15 +328,9 @@ function Enhance({ setToast }) {
                   />
                 </div>
                 <div className="settings-panel settings-panel-soft enhance-side-panel">
-                  <div className="enhance-side-meta">
-                    <div>
-                      <span className="small-text">Source</span>
-                      <strong>{sourceName}</strong>
-                    </div>
-                    <div>
-                      <span className="small-text">Preset</span>
-                      <strong>{presetLabel}</strong>
-                    </div>
+                  <div className="enhance-side-source">
+                    <span className="enhance-side-source-dot" aria-hidden="true" />
+                    <span className="enhance-side-source-name" title={sourceName}>{sourceName}</span>
                   </div>
                   <WaveformViewer originalUrl={originalUrl} enhancedUrl={enhancedUrl} embedded showTitle={false} />
                 </div>
@@ -431,39 +433,54 @@ function Enhance({ setToast }) {
                   <ABCompare originalUrl={originalUrl} enhancedUrl={enhancedUrl} embedded showTitle={false} />
                 </div>
                 <aside className="review-player-panel">
-                  <p className="field-label">Enhancement summary</p>
-                  <div className="review-meta enhance-review-meta">
-                    <div>
-                      <span className="small-text">Preset</span>
-                      <strong>{presetLabel}</strong>
-                    </div>
-                    <div>
-                      <span className="small-text">Noise</span>
-                      <strong>{settings.noise_reduction}</strong>
-                    </div>
-                    <div>
-                      <span className="small-text">Clarity</span>
-                      <strong>{settings.clarity}</strong>
-                    </div>
-                    <div>
-                      <span className="small-text">De-reverb</span>
-                      <strong>{settings.de_reverb}</strong>
-                    </div>
-                    <div>
-                      <span className="small-text">Compression</span>
-                      <strong>{settings.compression}</strong>
-                    </div>
-                    <div>
-                      <span className="small-text">Normalize</span>
-                      <strong>{settings.normalize ? "On" : "Off"}</strong>
-                    </div>
+                  {/* Preset header */}
+                  {(() => {
+                    const Icon = REVIEW_ICONS[activePreset] ?? SlidersHorizontal;
+                    return (
+                      <div className="rp-preset-header">
+                        <span className="rp-preset-icon"><Icon size={17} strokeWidth={2} /></span>
+                        <div className="rp-preset-info">
+                          <span className="rp-preset-kicker">Active preset</span>
+                          <span className="rp-preset-name">{presetLabel}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Numeric stats */}
+                  <div className="rp-stats">
+                    {[
+                      { label: "Noise Reduction", value: settings.noise_reduction },
+                      { label: "Clarity",         value: settings.clarity },
+                      { label: "De-reverb",       value: settings.de_reverb },
+                      { label: "Compression",     value: settings.compression },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="rp-stat-row">
+                        <div className="rp-stat-head">
+                          <span className="rp-stat-label">{label}</span>
+                          <span className="rp-stat-value">{value}</span>
+                        </div>
+                        <div className="rp-stat-bar">
+                          <div className="rp-stat-bar-fill" style={{ width: `${value}%` }} />
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <p className="review-player-hint small-text">
-                    Compare the original and enhanced outputs before exporting the final file.
-                  </p>
-                  <button type="button" className="btn btn-outline btn-full" onClick={() => goTo(2)}>
-                    Adjust settings
-                  </button>
+
+                  {/* Normalize status */}
+                  <div className="rp-normalize-row">
+                    <span className="rp-normalize-label">Normalize</span>
+                    <span className={`rp-normalize-badge${settings.normalize ? " on" : ""}`}>
+                      {settings.normalize ? "On · −14 LUFS" : "Off"}
+                    </span>
+                  </div>
+
+                  <div className="rp-actions">
+                    <p className="rp-hint">Compare both tracks before exporting.</p>
+                    <button type="button" className="btn btn-outline btn-full" onClick={() => goTo(2)}>
+                      Adjust settings
+                    </button>
+                  </div>
                 </aside>
               </div>
             </section>

@@ -62,6 +62,7 @@ function WaveformLane({ label, url, tone, emptyLabel }) {
     });
 
     return () => {
+      try { wave.pause(); } catch (_) {}
       wave.destroy();
       waveRef.current = null;
     };
@@ -103,8 +104,6 @@ function WaveformLane({ label, url, tone, emptyLabel }) {
           ))}
         </div>
       )}
-
-      <p className="small-text">{url ? `${label} ready` : emptyLabel}</p>
     </div>
   );
 }
@@ -115,7 +114,9 @@ function WaveformViewer({ originalUrl = "", enhancedUrl = "", embedded = false, 
       {showTitle && <h3>Waveform</h3>}
       <div className="wave-mini-stack">
         <WaveformLane label="Original" url={originalUrl} tone="original" emptyLabel="Waiting for source" />
-        <WaveformLane label="Enhanced" url={enhancedUrl} tone="enhanced" emptyLabel="Enhanced available after processing" />
+        {enhancedUrl && (
+          <WaveformLane label="Enhanced" url={enhancedUrl} tone="enhanced" emptyLabel="" />
+        )}
       </div>
     </section>
   );

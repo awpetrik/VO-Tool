@@ -83,6 +83,7 @@ function WaveTrackPlayer({ label, url, tone }) {
 
     return () => {
       clearTimeout(fallbackTimer);
+      try { wave.pause(); } catch (_) {}
       wave.destroy();
       waveRef.current = null;
     };
@@ -133,7 +134,11 @@ function ABCompare({ originalUrl, enhancedUrl, embedded = false, showTitle = tru
       {showTitle && <h3>Before &amp; After</h3>}
       <div className="soundcloud-compare-grid">
         <WaveTrackPlayer label="Original" url={originalUrl} tone="original" />
-        <div className="soundcloud-ab-badge" aria-hidden="true">A/B</div>
+        <div className="soundcloud-ab-divider" aria-hidden="true">
+          <span className="soundcloud-ab-line" />
+          <div className="soundcloud-ab-badge">A / B</div>
+          <span className="soundcloud-ab-line" />
+        </div>
         <WaveTrackPlayer label="Enhanced" url={enhancedUrl} tone="enhanced" />
       </div>
     </section>
