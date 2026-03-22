@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Check } from "lucide-react";
 import Recorder from "./Recorder";
 import Uploader from "./Uploader";
 
@@ -174,9 +175,7 @@ function buildSrt(segments) {
 
 function CheckIcon() {
   return (
-    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M3 8l3.5 3.5L13 5" />
-    </svg>
+    <Check size={12} strokeWidth={2.5} aria-hidden="true" />
   );
 }
 
@@ -186,7 +185,7 @@ function CaptionTool({ setToast }) {
   const [audioUrl, setAudioUrl] = useState("");
   const [language, setLanguage] = useState("auto");
   const [granularity, setGranularity] = useState("line");
-  const [maxChars, setMaxChars] = useState(50);
+  const [maxChars, setMaxChars] = useState(36);
   const [model, setModel] = useState("small");
   const [captionMode, setCaptionMode] = useState("hybrid");
   const [loading, setLoading] = useState(false);
@@ -283,7 +282,7 @@ function CaptionTool({ setToast }) {
 
       setLanguage(draft.language || "auto");
       setGranularity(draft.granularity || "line");
-      setMaxChars(typeof draft.maxChars === "number" ? draft.maxChars : 50);
+      setMaxChars(typeof draft.maxChars === "number" ? draft.maxChars : 36);
       setModel(draft.model || "small");
       setCaptionMode(draft.captionMode || "hybrid");
       setResult(draft.result || { segments: restoredSegments, language_detected: draft.language || "unknown" });

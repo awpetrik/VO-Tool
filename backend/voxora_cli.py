@@ -214,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     caption.add_argument("--model", default="small", choices=["tiny", "base", "small", "large-v3"])
     caption.add_argument("--language", default="auto", choices=["auto", "id", "en"])
     caption.add_argument("--granularity", default="line", choices=["line", "word"])
-    caption.add_argument("--max-chars", type=int, default=50)
+    caption.add_argument("--max-chars", type=int, default=36)
     caption.add_argument("--save-json", help="Output path for caption JSON")
     caption.add_argument("--save-srt", help="Output path for SRT subtitle")
     caption.set_defaults(func=_run_caption)

@@ -920,7 +920,7 @@ async def caption_audio(
     file: UploadFile = File(...),
     language: str = Form("auto"),
     granularity: str = Form("line"),
-    max_chars: int = Form(50),
+    max_chars: int = Form(36),
     model: str = Form("small"),
     mode: str = Form("hybrid"),
 ) -> StreamingResponse:

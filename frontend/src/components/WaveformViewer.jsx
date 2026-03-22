@@ -1,21 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
+import { Pause, Play } from "lucide-react";
 
 function PlayIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-      <path d="M5.5 3.5a.5.5 0 0 1 .764-.424l7 4a.5.5 0 0 1 0 .848l-7 4A.5.5 0 0 1 5.5 11.5v-8Z"/>
-    </svg>
-  );
+  return <Play size={16} fill="currentColor" strokeWidth={1.8} aria-hidden="true" />;
 }
 
 function PauseIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-      <rect x="3.5" y="2.5" width="3" height="11" rx="1.25"/>
-      <rect x="9.5" y="2.5" width="3" height="11" rx="1.25"/>
-    </svg>
-  );
+  return <Pause size={16} strokeWidth={2.1} aria-hidden="true" />;
 }
 
 function formatAudioTime(seconds) {

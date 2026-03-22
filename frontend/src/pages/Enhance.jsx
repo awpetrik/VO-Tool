@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Check, ChevronLeft } from "lucide-react";
 import Recorder from "../components/Recorder";
 import Uploader from "../components/Uploader";
 import WaveformViewer from "../components/WaveformViewer";
@@ -42,9 +43,7 @@ function buildSettingsSignature(settings) {
 
 function CheckIcon() {
   return (
-    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M3 8l3.5 3.5L13 5" />
-    </svg>
+    <Check size={12} strokeWidth={2.5} aria-hidden="true" />
   );
 }
 
@@ -225,7 +224,7 @@ function Enhance({ setToast }) {
     <div className="page-wrap page-wrap-wide">
       <div className="page-header">
         <button className="back-link" onClick={() => navigate("/")} aria-label="Back to Home">
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>
+          <ChevronLeft size={14} strokeWidth={2.5} aria-hidden="true" />
           Back
         </button>
         <h2 className="page-title">Enhance Voice</h2>
