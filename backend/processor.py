@@ -147,33 +147,26 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
             )
 
             yield _sse("eq", "Applying tone, noise gate, and dynamics…", 55)
-            gate_threshold_db = -55 + (de_reverb * 18)  # More de-reverb -> more assertive gating.
-            gate_ratio = 1.4 + (de_reverb * 3.2)
-            gate_release_ms = 230 - (de_reverb * 140)
-
-            # Clarity boost can over-emphasize sibilance, so add a gentle high-end tame.
-            high_tame_cutoff_hz = 10800 - (clarity * 1400)
             board = Pedalboard(
                 [
+                    # Gate room hiss between phrases before tone shaping.
+                    NoiseGate(threshold_db=-45.0, ratio=1.5, release_ms=250),
                     HighpassFilter(cutoff_frequency_hz=80 + (de_reverb * 120)),
                     PeakFilter(
                         cutoff_frequency_hz=3000 + (clarity * 2000),
-                        gain_db=2 + (clarity * 4),
-                        q=0.8,
+                        gain_db=1.0 + (clarity * 2.5),
+                        q=1.2,
                     ),
-                    LowpassFilter(cutoff_frequency_hz=max(8500, high_tame_cutoff_hz)),
-                    NoiseGate(
-                        threshold_db=gate_threshold_db,
-                        ratio=gate_ratio,
-                        attack_ms=6,
-                        release_ms=max(70, gate_release_ms),
-                    ),
+                    # Soften harsh high-end and sibilance after clarity boost.
+                    LowpassFilter(cutoff_frequency_hz=12000),
                     Compressor(
                         threshold_db=-22 + (compression * 8),
                         ratio=2.0 + (compression * 4),
                         attack_ms=5,
                         release_ms=180,
                     ),
+                    # Prevent transient peaks from clipping.
+                    Limiter(threshold_db=-1.5, release_ms=100),
                 ]
             )
             processed = board(reduced.astype(np.float32), sr)
@@ -184,10 +177,8 @@ async def enhance_audio(file: UploadFile = File(...), settings: str = Form(...))
                 loudness = meter.integrated_loudness(processed)
                 processed = pyln.normalize.loudness(processed, loudness, -14.0)
 
-            # Final peak safety ceiling to prevent transient clipping after all processing.
-            yield _sse("limit", "Applying peak limiter…", 85)
-            limiter = Pedalboard([Limiter(threshold_db=-1.0, release_ms=60)])
-            processed = limiter(processed.astype(np.float32), sr)
+            # Hard guard rail for sample bounds before encoding.
+            processed = np.clip(processed, -1.0, 1.0)
 
             yield _sse("encode", "Encoding WAV output…", 92)
             buf = io.BytesIO()
