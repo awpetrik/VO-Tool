@@ -31,6 +31,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 GEMINI_BATCH_SIZE = 24
 GEMINI_BATCH_CHAR_LIMIT = 2200
 GEMINI_CLOUD_MAX_BYTES = int(os.getenv("GEMINI_CLOUD_MAX_BYTES", str(100 * 1024 * 1024)))
+TIMING_ALIGN_MODEL = os.getenv("VOXORA_TIMING_ALIGN_MODEL", "tiny")
+TIMING_ALIGN_LOOKAHEAD = int(os.getenv("VOXORA_TIMING_ALIGN_LOOKAHEAD", "12"))
 
 # Audio conversion settings (for large files)
 AUDIO_CONVERSION_THRESHOLD_BYTES = int(os.getenv("AUDIO_CONVERSION_THRESHOLD_BYTES", str(5 * 1024 * 1024)))
@@ -345,6 +347,181 @@ def _line_segments_to_word_segments(segments: list[dict[str, Any]]) -> list[dict
             w_end = start + (i + 1) * step
             words_out.append({"start": w_start, "end": w_end, "text": token, "words": []})
     return words_out
+
+
+def _normalize_token(token: str) -> str:
+    lowered = token.strip().lower()
+    return re.sub(r"[^a-z0-9']+", "", lowered)
+
+
+def _extract_words_from_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tokens: list[dict[str, Any]] = []
+    for line_idx, seg in enumerate(segments):
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        for raw in text.split():
+            token = raw.strip()
+            if not token:
+                continue
+            tokens.append({
+                "line_idx": line_idx,
+                "text": token,
+                "norm": _normalize_token(token),
+            })
+    return tokens
+
+
+def _extract_local_aligned_words(
+    *,
+    audio_path: str,
+    language: str,
+    cache_root: str,
+) -> list[dict[str, Any]]:
+    align_model = TIMING_ALIGN_MODEL if TIMING_ALIGN_MODEL in SUPPORTED_MODELS else "tiny"
+    device = pick_transcription_device(align_model)
+    if device == "mps":
+        device = "cpu"
+
+    model_instance = whisper.load_model(
+        align_model,
+        download_root=cache_root,
+        device=device,
+    )
+
+    try:
+        transcribe_opts: dict[str, Any] = {
+            "language": None if language == "auto" else language,
+            "word_timestamps": True,
+            "task": "transcribe",
+            "beam_size": 3,
+            "best_of": 1,
+            "temperature": (0.0,),
+            "condition_on_previous_text": False,
+        }
+        if device in {"cpu", "mps"}:
+            transcribe_opts["fp16"] = False
+
+        with torch.inference_mode():
+            result = model_instance.transcribe(audio_path, **transcribe_opts)
+
+        aligned_words: list[dict[str, Any]] = []
+        for segment in result.get("segments", []):
+            for word in segment.get("words", []):
+                raw = str(word.get("word", "")).strip()
+                norm = _normalize_token(raw)
+                if not norm:
+                    continue
+                start = float(word.get("start", segment.get("start", 0.0)))
+                end = float(word.get("end", segment.get("end", start + 0.18)))
+                if end <= start:
+                    end = start + 0.18
+                aligned_words.append({"text": raw, "norm": norm, "start": start, "end": end})
+
+        return aligned_words
+    finally:
+        del model_instance
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+        gc.collect()
+
+
+def _align_cloud_words_with_local_timing(
+    *,
+    cloud_line_segments: list[dict[str, Any]],
+    aligned_words: list[dict[str, Any]],
+    duration: float,
+) -> tuple[list[dict[str, Any]], float]:
+    cloud_tokens = _extract_words_from_segments(cloud_line_segments)
+    if not cloud_tokens or not aligned_words:
+        return [], 0.0
+
+    mapped: list[dict[str, Any]] = []
+    aligned_idx = 0
+    matched = 0
+
+    for token in cloud_tokens:
+        norm = token.get("norm", "")
+        if not norm:
+            continue
+
+        found_idx = -1
+        end_idx = min(len(aligned_words), aligned_idx + max(1, TIMING_ALIGN_LOOKAHEAD))
+        for i in range(aligned_idx, end_idx):
+            if aligned_words[i].get("norm") == norm:
+                found_idx = i
+                break
+
+        if found_idx >= 0:
+            match = aligned_words[found_idx]
+            mapped.append(
+                {
+                    "line_idx": token["line_idx"],
+                    "text": token["text"],
+                    "start": float(match["start"]),
+                    "end": float(match["end"]),
+                    "matched": True,
+                }
+            )
+            aligned_idx = found_idx + 1
+            matched += 1
+        else:
+            mapped.append(
+                {
+                    "line_idx": token["line_idx"],
+                    "text": token["text"],
+                    "start": -1.0,
+                    "end": -1.0,
+                    "matched": False,
+                }
+            )
+
+    if not mapped:
+        return [], 0.0
+
+    coverage = matched / max(1, len(mapped))
+
+    cursor = 0.0
+    for i, item in enumerate(mapped):
+        if item["matched"]:
+            start = max(cursor, float(item["start"]))
+            end = max(start + 0.06, float(item["end"]))
+            if duration > 0:
+                start = min(start, duration)
+                end = min(max(start + 0.06, end), duration)
+            item["start"] = start
+            item["end"] = end
+            cursor = end
+            continue
+
+        next_start = None
+        for j in range(i + 1, len(mapped)):
+            if mapped[j]["matched"]:
+                next_start = float(mapped[j]["start"])
+                break
+
+        synthetic_start = cursor
+        synthetic_span = 0.18
+        if next_start is not None and next_start > cursor:
+            remaining = j - i
+            synthetic_span = max(0.08, min(0.35, (next_start - cursor) / max(1, remaining + 1)))
+
+        synthetic_end = synthetic_start + synthetic_span
+        if duration > 0:
+            synthetic_start = min(synthetic_start, duration)
+            synthetic_end = min(max(synthetic_start + 0.06, synthetic_end), duration)
+
+        item["start"] = synthetic_start
+        item["end"] = synthetic_end
+        cursor = synthetic_end
+
+    out = [
+        {"start": float(item["start"]), "end": float(item["end"]), "text": str(item["text"]), "words": []}
+        for item in mapped
+    ]
+    return out, coverage
 
 
 def _fallback_text_to_segments(text: str, duration: float, max_chars: int) -> list[dict[str, Any]]:
@@ -814,11 +991,50 @@ async def caption_audio(
                     audio_path=converted_audio_path,
                     mime_type=effective_mime_type,
                     language=language,
-                    granularity=granularity,
+                    granularity="line",
                     max_chars=max_chars,
                 )
                 if not segments:
                     raise RuntimeError("Cloud transcription produced no segments")
+
+                timing_source = "cloud_segment_estimate"
+                timing_quality = "estimated"
+                if granularity == "word":
+                    yield _sse("align", "Aligning word timings locally…", 82)
+                    cache_root = whisper_cache_dir()
+                    try:
+                        aligned_words = _extract_local_aligned_words(
+                            audio_path=converted_audio_path,
+                            language=language,
+                            cache_root=cache_root,
+                        )
+                        duration = _audio_duration_seconds(converted_audio_path)
+                        aligned_segments, coverage = _align_cloud_words_with_local_timing(
+                            cloud_line_segments=segments,
+                            aligned_words=aligned_words,
+                            duration=duration,
+                        )
+                        if aligned_segments and coverage >= 0.55:
+                            segments = aligned_segments
+                            timing_source = "cloud_text_local_word_align"
+                            timing_quality = "high" if coverage >= 0.8 else "medium"
+                            cloud_note = (
+                                f"{cloud_note} Word timing aligned locally "
+                                f"(coverage={coverage:.2f}, model={TIMING_ALIGN_MODEL})."
+                            )
+                        else:
+                            segments = _line_segments_to_word_segments(segments)
+                            timing_source = "cloud_segment_split_fallback"
+                            timing_quality = "low"
+                            cloud_note = (
+                                f"{cloud_note} Local timing alignment coverage too low "
+                                f"(coverage={coverage:.2f}), used estimated word split."
+                            )
+                    except Exception as align_exc:  # noqa: BLE001
+                        segments = _line_segments_to_word_segments(segments)
+                        timing_source = "cloud_segment_split_fallback"
+                        timing_quality = "low"
+                        cloud_note = f"{cloud_note} Local timing alignment failed: {align_exc}"
 
                 yield _sse("segments", "Building caption segments…", 90)
                 srt = build_srt(segments)
@@ -829,6 +1045,8 @@ async def caption_audio(
                         "srt": srt,
                         "refined_with": "cloud",
                         "refinement_note": cloud_note,
+                        "timing_source": timing_source,
+                        "timing_quality": timing_quality,
                     }
                 })
                 return
