@@ -1,5 +1,6 @@
 const PRESETS = {
   Podcast: { noise_reduction: 80, clarity: 70, de_reverb: 30, compression: 70, normalize: true },
+  "Voice Over": { noise_reduction: 70, clarity: 90, de_reverb: 65, compression: 60, normalize: true },
   Vocal: { noise_reduction: 60, clarity: 80, de_reverb: 50, compression: 50, normalize: true },
   "Call Recording": { noise_reduction: 90, clarity: 60, de_reverb: 60, compression: 80, normalize: true },
   Interview: { noise_reduction: 75, clarity: 65, de_reverb: 40, compression: 65, normalize: true },

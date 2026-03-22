@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import SiriWave from "siriwave";
 
 function Recorder({ onAudioReady }) {
   const [isRecording, setIsRecording] = useState(false);
@@ -9,11 +10,51 @@ function Recorder({ onAudioReady }) {
   const streamRef = useRef(null);
   const audioUrlRef = useRef("");
   const isRecordingRef = useRef(false);
-  const canvasRef = useRef(null);
+  const siriContainerRef = useRef(null);
+  const siriWaveRef = useRef(null);
   const analyserRef = useRef(null);
   const audioContextRef = useRef(null);
   const sourceNodeRef = useRef(null);
   const animationFrameRef = useRef(null);
+  const waveAmplitudeRef = useRef(1.5);
+
+  const ensureSiriWave = () => {
+    if (siriWaveRef.current || !siriContainerRef.current) return;
+    const host = siriContainerRef.current;
+    const width = Math.max(280, Math.floor(host.clientWidth || 0));
+
+    siriWaveRef.current = new SiriWave({
+      container: host,
+      width,
+      height: 128,
+      style: "ios9",
+      autostart: true,
+      speed: 0.12,
+      amplitude: waveAmplitudeRef.current,
+      lerpSpeed: 0.06,
+      cover: true,
+      curveDefinition: [
+        { color: "109, 140, 183", supportLine: true },
+        { color: "15, 82, 169" },
+        { color: "38, 157, 123" },
+        { color: "173, 57, 76" },
+      ],
+    });
+  };
+
+  const recreateSiriWave = () => {
+    if (siriWaveRef.current) {
+      siriWaveRef.current.dispose();
+      siriWaveRef.current = null;
+    }
+    ensureSiriWave();
+    siriWaveRef.current?.setAmplitude(waveAmplitudeRef.current);
+  };
+
+  const setIdleAmplitude = () => {
+    waveAmplitudeRef.current = 1.5;
+    siriWaveRef.current?.setAmplitude(1.5);
+  };
 
   const stopVisualizer = () => {
     if (animationFrameRef.current) {
@@ -31,36 +72,20 @@ function Recorder({ onAudioReady }) {
       });
       audioContextRef.current = null;
     }
-  };
-
-  const drawIdleWave = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const width = Math.max(280, Math.floor(canvas.clientWidth || 0));
-    const height = 88;
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, width, height);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#d6deea";
-    ctx.beginPath();
-    ctx.moveTo(0, height / 2);
-    ctx.lineTo(width, height / 2);
-    ctx.stroke();
+    setIdleAmplitude();
   };
 
   const startVisualizer = (stream) => {
     stopVisualizer();
+    ensureSiriWave();
+
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
 
     const ctx = new AudioContextClass();
     const analyser = ctx.createAnalyser();
-    analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.85;
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.88;
     const source = ctx.createMediaStreamSource(stream);
     source.connect(analyser);
 
@@ -70,41 +95,23 @@ function Recorder({ onAudioReady }) {
 
     const bufferLength = analyser.fftSize;
     const dataArray = new Uint8Array(bufferLength);
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const canvasCtx = canvas.getContext("2d");
-    if (!canvasCtx) return;
-
     const draw = () => {
-      const width = Math.max(280, Math.floor(canvas.clientWidth || 0));
-      const height = 88;
-      if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
-      }
-
       analyser.getByteTimeDomainData(dataArray);
-      canvasCtx.clearRect(0, 0, width, height);
-      canvasCtx.lineWidth = 2.2;
-      canvasCtx.strokeStyle = "#3d5a80";
-      canvasCtx.beginPath();
-
-      const sliceWidth = width / bufferLength;
-      let x = 0;
-
+      let sumSquares = 0;
+      let peak = 0;
       for (let i = 0; i < bufferLength; i += 1) {
-        const v = dataArray[i] / 128.0;
-        const y = (v * height) / 2;
-        if (i === 0) {
-          canvasCtx.moveTo(x, y);
-        } else {
-          canvasCtx.lineTo(x, y);
-        }
-        x += sliceWidth;
+        const normalized = (dataArray[i] - 128) / 128;
+        const abs = Math.abs(normalized);
+        sumSquares += normalized * normalized;
+        if (abs > peak) peak = abs;
       }
 
-      canvasCtx.lineTo(width, height / 2);
-      canvasCtx.stroke();
+      const rms = Math.sqrt(sumSquares / bufferLength);
+      const targetAmplitude = Math.min(3.5, 1.0 + rms * 14.0 + peak * 5.5);
+      waveAmplitudeRef.current += (targetAmplitude - waveAmplitudeRef.current) * 0.3;
+
+      siriWaveRef.current?.setAmplitude(Math.max(1.0, waveAmplitudeRef.current));
+
       animationFrameRef.current = requestAnimationFrame(draw);
     };
 
@@ -120,9 +127,12 @@ function Recorder({ onAudioReady }) {
   }, [isRecording]);
 
   useEffect(() => {
-    drawIdleWave();
+    ensureSiriWave();
     const onResize = () => {
-      if (!isRecordingRef.current) drawIdleWave();
+      recreateSiriWave();
+      if (!isRecordingRef.current) {
+        setIdleAmplitude();
+      }
     };
     window.addEventListener("resize", onResize);
 
@@ -131,6 +141,10 @@ function Recorder({ onAudioReady }) {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
       stopVisualizer();
+      if (siriWaveRef.current) {
+        siriWaveRef.current.dispose();
+        siriWaveRef.current = null;
+      }
       if (audioUrlRef.current) {
         URL.revokeObjectURL(audioUrlRef.current);
       }
@@ -141,6 +155,7 @@ function Recorder({ onAudioReady }) {
   const startRecording = async () => {
     try {
       setRecorderError("");
+      ensureSiriWave();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
@@ -168,6 +183,7 @@ function Recorder({ onAudioReady }) {
       recorder.start();
       setIsRecording(true);
     } catch {
+      stopVisualizer();
       setRecorderError("Microphone access was blocked. Please allow mic permission and try again.");
     }
   };
@@ -177,7 +193,6 @@ function Recorder({ onAudioReady }) {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     stopVisualizer();
-    drawIdleWave();
     setIsRecording(false);
   };
 
@@ -187,7 +202,7 @@ function Recorder({ onAudioReady }) {
       return "";
     });
     setRecorderError("");
-    drawIdleWave();
+    stopVisualizer();
     onAudioReady(null, "");
   };
 
@@ -203,7 +218,7 @@ function Recorder({ onAudioReady }) {
       </div>
 
       <div className={`recorder-wave-shell${isRecording ? " is-live" : ""}`}>
-        <canvas ref={canvasRef} className="recorder-wave-canvas" aria-hidden="true" />
+        <div ref={siriContainerRef} className="recorder-wave-canvas" aria-hidden="true" />
       </div>
 
       <div className="button-row">

@@ -776,18 +776,27 @@ summary:focus-visible,
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 8px 10px;
+  overflow: hidden;
   background: linear-gradient(180deg, #f8fbff 0%, #f2f6fc 100%);
 }
 
 .recorder-wave-shell.is-live {
   border-color: rgba(61, 90, 128, 0.38);
   box-shadow: inset 0 0 0 1px rgba(61, 90, 128, 0.09);
+  background: linear-gradient(180deg, #f4f9ff 0%, #edf5ff 54%, #eef8f4 100%);
 }
 
 .recorder-wave-canvas {
   display: block;
   width: 100%;
-  height: 88px;
+  height: 128px;
+  position: relative;
+}
+
+.recorder-wave-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .upload-card {
